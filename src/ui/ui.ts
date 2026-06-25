@@ -43,6 +43,9 @@ export interface UiState {
   componentHeights: Record<string, number>;
   /** Which parts are currently selected in the viewport (part names). */
   selectedParts: string[];
+  /** Whether an undo / redo step is available (drives the toolbar buttons). */
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface UiCallbacks {
@@ -82,6 +85,8 @@ export interface UiCallbacks {
   onEdgeStep(target: string, delta: number): void;
   onExtrudeStep(delta: number): void;
   onGenerate(): void;
+  onUndo(): void;
+  onRedo(): void;
 }
 
 const POPULAR_LUCIDE = [
@@ -119,6 +124,18 @@ const hexRgb = (hex: string): [number, number, number] => [
   parseInt(hex.slice(3, 5), 16),
   parseInt(hex.slice(5, 7), 16),
 ];
+
+// Friendly label for an edge target (global edge, body, cap frame, or a color part).
+const friendlyTargetLabel = (t: string): string => {
+  if (t === 'capTop') return 'Cap Top';
+  if (t === 'baseTop') return 'Base Top';
+  if (t === 'baseBottom') return 'Base Bottom';
+  if (t === 'base-body') return 'Body';
+  if (t === 'top-base') return 'Cap Frame';
+  const m = /^top-color-(\d+)-\d+$/.exec(t);
+  if (m) return `Color ${+m[1] + 1}`;
+  return t;
+};
 
 export function createUi(
   sidebarLeft: HTMLElement,
@@ -631,6 +648,22 @@ export function createUi(
       if (btn) cb.onEditMode(btn.dataset.editmode as EditMode);
     });
 
+    // --- Undo / Redo toolbar (top-left of the viewport) ---
+    const historyBar = document.createElement('div');
+    historyBar.id = 'historyBar';
+    historyBar.className = 'history-bar';
+    historyBar.innerHTML = `
+      <button id="undoBtn" class="history-btn" type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+      </button>
+      <button id="redoBtn" class="history-btn" type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+      </button>
+    `;
+    viewport.appendChild(historyBar);
+    historyBar.querySelector('#undoBtn')?.addEventListener('click', () => cb.onUndo());
+    historyBar.querySelector('#redoBtn')?.addEventListener('click', () => cb.onRedo());
+
     // --- Extrude Panel ---
     const extrudePanel = document.createElement('div');
     extrudePanel.id = 'extrudePanel';
@@ -643,13 +676,12 @@ export function createUi(
         <button type="button" class="btn" id="extrudeMinus" style="flex:1; font-size:18px;">-</button>
         <button type="button" class="btn" id="extrudePlus" style="flex:1; font-size:18px;">+</button>
       </div>
-      <button type="button" class="btn primary" id="extrudeSync" style="margin-top:8px;">Sync Geometry</button>
+      <div class="panel-hint">Raises or lowers the selected color. Shift-click parts to select several.</div>
     `;
     viewport.appendChild(extrudePanel);
 
     extrudePanel.querySelector('#extrudeMinus')?.addEventListener('click', () => cb.onExtrudeStep(-1));
     extrudePanel.querySelector('#extrudePlus')?.addEventListener('click', () => cb.onExtrudeStep(1));
-    extrudePanel.querySelector('#extrudeSync')?.addEventListener('click', () => cb.onGenerate());
 
     // --- Edges Panel ---
     const edgesPanel = document.createElement('div');
@@ -659,11 +691,9 @@ export function createUi(
     edgesPanel.innerHTML = `
       <div class="edges-title" id="edgesTitle">Edge Modifications</div>
       <div id="edgesContent"></div>
-      <button type="button" class="btn primary" id="edgesSync" style="margin-top:8px;">Sync Geometry</button>
+      <div class="panel-hint">Select a part to round (fillet) or bevel (chamfer) its top edge. Shift-click for several.</div>
     `;
     viewport.appendChild(edgesPanel);
-
-    edgesPanel.querySelector('#edgesSync')?.addEventListener('click', () => cb.onGenerate());
 
     edgesPanel.addEventListener('click', (e) => {
       const targetEl = e.target as HTMLElement;
@@ -799,7 +829,7 @@ export function createUi(
     wm.innerHTML = `
       <div class="welcome-card">
         <h2>Welcome to Clicker Generator 👋</h2>
-        <p>Turn any image, SVG, icon, or text into a multi-color 3D printable clicker — ready for Bambu Studio or PrusaSlicer.</p>
+        <p>Turn any image, SVG, icon, or text into a multi-color 3D printable clicker, ready for Bambu Studio or PrusaSlicer.</p>
         <div class="welcome-steps">
           <div class="welcome-step">
             <div class="welcome-step-num">1</div>
@@ -819,7 +849,7 @@ export function createUi(
             <div class="welcome-step-num">3</div>
             <div class="welcome-step-text">
               <strong>Export &amp; print</strong>
-              <span>Download the 3MF file and load it directly into your slicer — each color is a separate part.</span>
+              <span>Download the 3MF file and load it directly into your slicer. Each color is a separate part.</span>
             </div>
           </div>
         </div>
@@ -1118,6 +1148,12 @@ export function createUi(
       }
     }
 
+    // --- Undo / redo toolbar ---
+    const undoBtn = document.getElementById('undoBtn') as HTMLButtonElement | null;
+    const redoBtn = document.getElementById('redoBtn') as HTMLButtonElement | null;
+    if (undoBtn) undoBtn.disabled = !state.canUndo;
+    if (redoBtn) redoBtn.disabled = !state.canRedo;
+
     // --- Extrude tooltip ---
     const extrudeTooltipEl = document.getElementById('extrudeTooltip');
     if (extrudeTooltipEl) {
@@ -1149,7 +1185,10 @@ export function createUi(
           if (labelEl) {
             const firstPart = state.selectedParts[0];
             const level = state.componentHeights[firstPart] ?? 0;
-            labelEl.textContent = `Level: ${level.toFixed(1)}`;
+            const n = state.selectedParts.length;
+            labelEl.textContent = n > 1
+              ? `${n} parts selected · Level: ${level.toFixed(1)}`
+              : `Level: ${level.toFixed(1)}`;
           }
         }
       } else {
@@ -1173,7 +1212,7 @@ export function createUi(
         const currentTargets = Array.from(edgesContentEl.querySelectorAll('.edge-style-btns')).map(r => (r as HTMLElement).dataset.edge);
         if (targets.join(',') !== currentTargets.join(',')) {
           edgesContentEl.innerHTML = targets.map(t => {
-            const label = t === 'capTop' ? 'Cap Top' : t === 'baseTop' ? 'Base Top' : t === 'baseBottom' ? 'Base Bottom' : t;
+            const label = friendlyTargetLabel(t);
             return `
               <div class="edge-label" title="${t}" style="margin-bottom: 4px;">${label} <span class="edge-radius-label" style="color:var(--muted);"></span></div>
               <div class="edge-style-btns" data-edge="${t}" style="margin-bottom: 8px;">
@@ -1191,7 +1230,8 @@ export function createUi(
         
         // Sync button state from edgeSettings
         for (const target of targets) {
-          const es = state.edgeSettings.find(s => s.target === target) || { target, style: 'none', radius: 1.0 };
+          const defaultRadius = target === 'capTop' || target === 'baseTop' || target === 'baseBottom' ? 0 : 1.0;
+          const es = state.edgeSettings.find(s => s.target === target) || { target, style: 'none', radius: defaultRadius };
           const btnsRow = edgesContentEl.querySelector(`.edge-style-btns[data-edge="${target}"]`) as HTMLElement;
           const sizeRow = edgesContentEl.querySelector(`.edge-size-btns[data-edge="${target}"]`) as HTMLElement;
           const labelRow = edgesContentEl.querySelector(`.edge-label[title="${target}"] .edge-radius-label`) as HTMLElement;
@@ -1207,7 +1247,8 @@ export function createUi(
                labelRow.textContent = '';
             } else {
                sizeRow.style.display = 'flex';
-               labelRow.textContent = `(${es.radius.toFixed(1)} mm)`;
+               const safeRadius = es.radius !== undefined ? es.radius : 1.0;
+               labelRow.textContent = `(${safeRadius.toFixed(1)} mm)`;
             }
           }
         }

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { ClickerPart, EditMode, MeshData, RGB, ViewMode } from '../types';
+import type { ClickerPart, MeshData, RGB, ViewMode } from '../types';
 
 export type SectionAxis = 'x' | 'y' | 'z';
 
@@ -24,10 +24,6 @@ export interface Viewer {
   highlightParts(indices: number[]): void;
   /** Clear hover + selection highlights. */
   clearHighlight(): void;
-  /** Switch viewport edit mode (color / extrude / edges). */
-  setEditMode(mode: EditMode): void;
-  /** Register extrude drag callback — called with part indices and new height level. */
-  setComponentHeights(heights: Record<string, number>, stepHeight: number): void;
   dispose(): void;
 }
 
@@ -157,9 +153,6 @@ export function createViewer(container: HTMLElement): Viewer {
   let downY = 0;
   let downT = 0;
 
-  // ---- Edit mode state ----
-  let editMode: EditMode = 'color';
-
   let outlineMesh: THREE.LineSegments | null = null;
   const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x3b82f6, depthTest: false });
 
@@ -213,6 +206,7 @@ export function createViewer(container: HTMLElement): Viewer {
       materials.push(mat);
       const mesh = new THREE.Mesh(partToGeometry(p), mat);
       mesh.userData.partIndex = i; // raycast hit -> part/material index
+      mesh.userData.partName = p.name; // essential for live preview and syncing heights
       partMeshes.push(mesh);
       (p.kind === 'body' ? bodyGroup : capGroup).add(mesh);
     }
@@ -332,7 +326,9 @@ export function createViewer(container: HTMLElement): Viewer {
   function applyHighlight() {
     if (outlineMesh) {
       outlineMesh.removeFromParent();
-      outlineMesh.geometry.dispose();
+      outlineMesh.traverse((child: any) => {
+        if (child.geometry) child.geometry.dispose();
+      });
       outlineMesh = null;
     }
     for (let i = 0; i < partMeshes.length; i++) {
@@ -414,36 +410,25 @@ export function createViewer(container: HTMLElement): Viewer {
     if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) return;
     if (performance.now() - downT > 500) return;
     const idx = pickIndexAt(e.clientX, e.clientY);
-    
+
+    // Empty space clears the selection (all modes).
     if (idx === null) {
-      if (editMode === 'extrude' || editMode === 'edges') {
-        // Click on empty space deselects
-        selectedIndices = [];
-        applyHighlight();
-        pickCb?.(null, e.clientX, e.clientY, e.shiftKey);
-      }
+      selectedIndices = [];
+      applyHighlight();
+      pickCb?.(null, e.clientX, e.clientY, e.shiftKey);
       return;
     }
 
-    if (editMode === 'extrude' || editMode === 'edges') {
-      if (e.shiftKey) {
-        if (selectedIndices.includes(idx)) {
-          selectedIndices = selectedIndices.filter(i => i !== idx);
-        } else {
-          selectedIndices.push(idx);
-        }
-      } else {
-        selectedIndices = [idx];
-      }
-      applyHighlight();
-      
-      pickCb?.(idx, e.clientX, e.clientY, e.shiftKey);
+    // Shift-click toggles multi-selection in every mode; plain click selects one.
+    if (e.shiftKey) {
+      selectedIndices = selectedIndices.includes(idx)
+        ? selectedIndices.filter(i => i !== idx)
+        : [...selectedIndices, idx];
     } else {
-      // Color mode
       selectedIndices = [idx];
-      applyHighlight();
-      pickCb?.(idx, e.clientX, e.clientY, e.shiftKey);
     }
+    applyHighlight();
+    pickCb?.(idx, e.clientX, e.clientY, e.shiftKey);
   };
   renderer.domElement.addEventListener('pointermove', onPointerMove);
   renderer.domElement.addEventListener('pointerleave', onPointerLeave);
@@ -505,22 +490,6 @@ export function createViewer(container: HTMLElement): Viewer {
     highlightPart,
     highlightParts,
     clearHighlight,
-    setEditMode: (m: EditMode) => {
-      editMode = m;
-      if (editMode !== 'extrude' && editMode !== 'edges') {
-        selectedIndices = [];
-      }
-      applyHighlight();
-    },
-    setComponentHeights: (heights: Record<string, number>, stepHeight: number) => {
-      for (const mesh of partMeshes) {
-        const partData = mesh.userData.partName;
-        if (partData) {
-          const level = heights[partData] ?? 0;
-          mesh.position.z = level * stepHeight;
-        }
-      }
-    },
     dispose,
   };
 }

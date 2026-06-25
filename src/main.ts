@@ -70,6 +70,8 @@ const store = createStore<UiState>({
   extrudeHeight: null,
   componentHeights: {},
   selectedParts: [],
+  canUndo: false,
+  canRedo: false,
 });
 
 // ---- Heavy data kept out of the reactive store ----
@@ -180,7 +182,7 @@ const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
       await navigator.clipboard.writeText(AI_PROMPT);
       store.set({ status: 'AI image prompt copied to clipboard ✓' });
     } catch {
-      store.set({ status: 'Could not copy — see console.' });
+      store.set({ status: 'Could not copy, see console.' });
       console.log(AI_PROMPT);
     }
   },
@@ -248,23 +250,26 @@ const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
     reprocess();
   },
   onEditMode: (mode) => {
-    store.set({ editMode: mode });
-    viewer.setEditMode(mode);
-    // When leaving extrude mode, sync the geometry to match the visual preview
-    if (mode !== 'extrude') {
-      debouncedRebuild();
-    }
+    // Geometry is always kept in sync by the live edit rebuilds. Keep the selection
+    // when moving between extrude/edges (so you can raise then bevel the same parts),
+    // but clear it entering color mode so no stray highlight tints the swatches.
+    store.set({ editMode: mode, selectedParts: mode === 'color' ? [] : store.get().selectedParts });
   },
   onEdgeStyle: (target: string, style: EdgeStyle) => {
     const s = store.get();
     const edgeSettings = [...s.edgeSettings];
     const idx = edgeSettings.findIndex(x => x.target === target);
     if (idx >= 0) {
-      edgeSettings[idx] = { ...edgeSettings[idx], style };
+      const cur = edgeSettings[idx];
+      // Picking fillet/chamfer with no size yet gets a sensible default so the
+      // result is immediately visible (the old code left radius at 0 = no-op).
+      const radius = style !== 'none' && (!cur.radius || cur.radius < 0.2) ? 1.0 : cur.radius;
+      edgeSettings[idx] = { ...cur, style, radius };
     } else {
-      edgeSettings.push({ target, style, radius: 1.0 });
+      edgeSettings.push({ target, style, radius: style === 'none' ? 0 : 1.0 });
     }
     store.set({ edgeSettings });
+    debouncedQuietRebuild(); // live preview of the bevel
   },
   onEdgeStep: (target: string, delta: number) => {
     const s = store.get();
@@ -278,6 +283,7 @@ const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
       edgeSettings.push({ target, style: 'fillet', radius: next });
     }
     store.set({ edgeSettings });
+    debouncedQuietRebuild(); // live preview of the bevel size
   },
   onExtrudeStep: (delta: number) => {
     const s = store.get();
@@ -294,12 +300,102 @@ const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
     }
     if (changed) {
       store.set({ componentHeights });
-      viewer.setComponentHeights(componentHeights, 0.6); // 0.6mm step
+      // Rebuild for real so the part grows in place (no floating slab) — this IS
+      // the preview, and it bakes the height into the exported geometry.
+      debouncedQuietRebuild();
     }
+  },
+  onUndo: () => undo(),
+  onRedo: () => redo(),
+});
+
+// ---- Undo / redo ----------------------------------------------------------
+// History snapshots the editable "document" fields (colors, heights, edges,
+// shape/size). Each tracked change pushes a snapshot; re-tracing a new source
+// (reprocess) starts a fresh baseline. Restoring rebuilds the geometry.
+const HISTORY_FIELDS = [
+  'palette', 'paletteOverrides', 'partOverrides', 'bodyColorRgb', 'baseColorOverride',
+  'componentHeights', 'edgeSettings', 'baseShape', 'capWidthMm', 'topThickness',
+  'imageDepth', 'tolerance', 'keychain',
+] as const;
+let history: string[] = [];
+let histIndex = -1;
+let restoringHistory = false;
+let pendingHistoryReset = false;
+
+function snapshotHistory(): string {
+  const s = store.get() as any;
+  const picked: Record<string, unknown> = {};
+  for (const k of HISTORY_FIELDS) picked[k] = s[k];
+  return JSON.stringify(picked);
+}
+function updateHistoryButtons() {
+  store.set({ canUndo: histIndex > 0, canRedo: histIndex < history.length - 1 });
+}
+function resetHistory() {
+  history = [snapshotHistory()];
+  histIndex = 0;
+  updateHistoryButtons();
+}
+const commitHistory = debounce(() => {
+  if (restoringHistory || pendingHistoryReset || histIndex < 0) return;
+  const snap = snapshotHistory();
+  if (snap === history[histIndex]) return;
+  history = history.slice(0, histIndex + 1);
+  history.push(snap);
+  const MAX = 60;
+  if (history.length > MAX) history = history.slice(history.length - MAX);
+  histIndex = history.length - 1;
+  updateHistoryButtons();
+}, 350);
+function applyHistorySnapshot(snap: string) {
+  restoringHistory = true;
+  store.set(JSON.parse(snap));
+  restoringHistory = false;
+  updateHistoryButtons();
+  rebuild(); // regenerate geometry + colors for the restored state
+}
+function undo() {
+  if (histIndex <= 0) return;
+  histIndex--;
+  applyHistorySnapshot(history[histIndex]);
+}
+function redo() {
+  if (histIndex >= history.length - 1) return;
+  histIndex++;
+  applyHistorySnapshot(history[histIndex]);
+}
+
+// Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or Ctrl+Y = redo (ignored while typing).
+window.addEventListener('keydown', (e) => {
+  const el = e.target as HTMLElement | null;
+  const tag = el?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable) return;
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+  } else if (k === 'y') {
+    e.preventDefault();
+    redo();
   }
 });
 
-store.subscribe((s) => ui.update(s));
+store.subscribe((s) => {
+  ui.update(s);
+
+  // Highlight the current selection in every mode (hover is handled separately).
+  const indices: number[] = [];
+  s.selectedParts.forEach((name) => {
+    const idx = latestParts.findIndex((p) => p.name === name);
+    if (idx >= 0) indices.push(idx);
+  });
+  viewer.highlightParts(indices);
+
+  // Record undoable edits (debounced; no-op if nothing tracked actually changed).
+  if (!restoringHistory && !pendingHistoryReset) commitHistory();
+});
 ui.update(store.get());
 
 // Load heart sample on startup
@@ -315,45 +411,46 @@ SAMPLES[0].load().then((img) => {
 // ---- Click a colored region on the 3D model to recolor it (live, no rebuild) ----
 viewer.onPartPick((index, clientX, clientY, shiftKey) => {
   const s = store.get();
-  
+
+  // Empty space clears the selection (all modes).
   if (index === null) {
-    if (s.editMode !== 'color') store.set({ selectedParts: [] });
+    store.set({ selectedParts: [] });
     return;
   }
 
-  if (s.editMode !== 'color') {
-    // Sync the selected parts to UI state for the Edge panel
-    // We get the selected indices implicitly from the viewer, but we need to track them by name
-    const partName = latestParts[index]?.name;
-    if (partName) {
-      let nextSelected = s.selectedParts.slice();
-      if (shiftKey) {
-        if (nextSelected.includes(partName)) {
-          nextSelected = nextSelected.filter(p => p !== partName);
-        } else {
-          nextSelected.push(partName);
-        }
-      } else {
-        nextSelected = [partName];
-      }
-      store.set({ selectedParts: nextSelected });
-    }
+  const partName = latestParts[index]?.name;
+  if (!partName) return;
+
+  if (s.editMode === 'color') {
+    // Color mode: single target. Open the swatch picker for the clicked color and
+    // recolor its whole group; clear the highlight on close so the true color shows.
+    store.set({ selectedParts: [partName] });
+    const part = latestParts[index];
+    if (!part) return;
+    const target = partColorTarget(part.name);
+    if (!target) return;
+    const options: RGB[] =
+      s.colorMode === 'limited' && s.limitedColors.length > 0
+        ? s.limitedColors
+        : FILAMENTS.map(([, hex]) => hexToRgb(hex));
+    ui.showColorPopoverAt(clientX, clientY, rgbToHex(part.colorRgb), options, {
+      onSelect: (hex) => applyModelRecolor(target, hexToRgb(hex), index),
+      onClose: () => store.set({ selectedParts: [] }),
+    });
     return;
   }
 
-  const part = latestParts[index];
-  if (!part) return;
-  const target = partColorTarget(part.name);
-  if (!target) return;
-
-  const options: RGB[] =
-    s.colorMode === 'limited' && s.limitedColors.length > 0
-      ? s.limitedColors
-      : FILAMENTS.map(([, hex]) => hexToRgb(hex));
-  ui.showColorPopoverAt(clientX, clientY, rgbToHex(part.colorRgb), options, {
-    onSelect: (hex) => applyModelRecolor(target, hexToRgb(hex), index),
-    onClose: () => viewer.clearHighlight(),
-  });
+  // Extrude / edges: unified multi-selection — shift toggles a part in/out, a plain
+  // click selects one. The floating panels act on every selected part.
+  let nextSelected = s.selectedParts.slice();
+  if (shiftKey) {
+    nextSelected = nextSelected.includes(partName)
+      ? nextSelected.filter((p) => p !== partName)
+      : [...nextSelected, partName];
+  } else {
+    nextSelected = [partName];
+  }
+  store.set({ selectedParts: nextSelected });
 });
 
 function partColorTarget(name: string): ColorTarget | null {
@@ -372,19 +469,34 @@ function partColorTarget(name: string): ColorTarget | null {
 // persist into store state so it survives rebuilds. Geometry is identical for a
 // color change, so we deliberately skip the worker rebuild.
 function applyModelRecolor(target: ColorTarget, rgb: RGB, partIndex: number) {
-  viewer.setPartColor(partIndex, rgb);
-  if (latestParts[partIndex]) latestParts[partIndex] = { ...latestParts[partIndex], colorRgb: rgb };
-
   const s = store.get();
   if (target.kind === 'region') {
-    const partName = `top-color-${target.index}-${target.compIndex}`;
+    // Recolor EVERY component of this color across the model (not just the clicked
+    // one) and update the palette swatch + overrides, so clicking a color in the
+    // viewport behaves like changing its filament in the left menu (whole model).
+    const i = target.index;
+    const prefix = `top-color-${i}-`;
     const overrides = s.partOverrides ? { ...s.partOverrides } : {};
-    overrides[partName] = rgb;
-    store.set({ partOverrides: overrides });
-    syncBaseColor(); // the cap frame mirrors the dominant region — keep it in step
+    latestParts.forEach((p, idx) => {
+      if (p.name.startsWith(prefix)) {
+        viewer.setPartColor(idx, rgb);
+        latestParts[idx] = { ...latestParts[idx], colorRgb: rgb };
+        overrides[p.name] = rgb;
+      }
+    });
+    const palette = s.palette.slice();
+    if (palette[i]) palette[i] = { ...palette[i], filamentRgb: rgb };
+    const paletteOverrides = s.paletteOverrides.slice();
+    paletteOverrides[i] = rgb;
+    store.set({ partOverrides: overrides, palette, paletteOverrides });
+    syncBaseColor(); // the cap frame mirrors the dominant region, keep it in step
   } else if (target.kind === 'body') {
+    viewer.setPartColor(partIndex, rgb);
+    if (latestParts[partIndex]) latestParts[partIndex] = { ...latestParts[partIndex], colorRgb: rgb };
     store.set({ bodyColorRgb: rgb });
   } else {
+    viewer.setPartColor(partIndex, rgb);
+    if (latestParts[partIndex]) latestParts[partIndex] = { ...latestParts[partIndex], colorRgb: rgb };
     store.set({ baseColorOverride: rgb });
   }
 }
@@ -463,7 +575,7 @@ worker.onmessage = (e: MessageEvent<GeometryResponse>) => {
       viewer.setSwitch(msg.switchMesh);
       viewer.showSwitch(store.get().showSwitch);
       store.set({
-        status: 'Ready — import an image, SVG, icon, or text.',
+        status: 'Ready. Import an image, SVG, icon, or text.',
       });
       // Pick a default popular icon on startup so it builds immediately
       if (store.get().importMode === 'icon' && !currentIconText) {
@@ -480,12 +592,23 @@ worker.onmessage = (e: MessageEvent<GeometryResponse>) => {
       latestParts = msg.parts;
       viewer.setParts(msg.parts);
       viewer.setView(store.get().view);
+
+      // Extrude heights are baked into the geometry now — do NOT translate the
+      // meshes too, or the raised part would float a second step above the model.
+      // (Selection highlight is re-applied by the store subscription below.)
+
       store.set({
         building: false,
         hasParts: msg.parts.length > 0,
         status: '', // Clear the banner when ready
       });
       isInitialLoad = false;
+
+      // After a re-trace, the first build becomes the new undo baseline.
+      if (pendingHistoryReset) {
+        pendingHistoryReset = false;
+        resetHistory();
+      }
       break;
     }
     case 'error':
@@ -520,7 +643,7 @@ async function openWizard(getter: () => Promise<RgbaImage>) {
       baseImage,
       initialColorCount: store.get().colorCount,
       onCancel: () =>
-        store.set({ status: originalImage ? 'Ready.' : 'Ready — drop an image or try the sample.' }),
+        store.set({ status: originalImage ? 'Ready.' : 'Ready. Drop an image or try the sample.' }),
       onComplete: ({ adjusted, preprocess, colorCount, colorMode, limitedColors, paletteOverrides }) => {
         originalImage = adjusted;
         let defaultBodyColor = store.get().bodyColorRgb;
@@ -548,7 +671,9 @@ async function openWizard(getter: () => Promise<RgbaImage>) {
 }
 
 function reprocess() {
-  // A fresh trace means fresh regions — drop any pinned frame color so it re-derives.
+  // A fresh trace means fresh regions, so start a new undo baseline and drop any
+  // pinned frame color so it re-derives.
+  pendingHistoryReset = true;
   store.set({ baseColorOverride: null });
   const s = store.get();
 
@@ -618,7 +743,7 @@ function reprocess() {
   rebuild();
 }
 
-function rebuild() {
+function rebuild(quiet = false) {
   if (!regionSet || regionSet.regions.length === 0) return;
   if (!assetsReady) {
     store.set({ status: 'Waiting for switch assets…' });
@@ -670,7 +795,9 @@ function rebuild() {
     componentHeights: s.componentHeights,
   };
 
-  if (isInitialLoad) {
+  if (quiet) {
+    // Live edit preview (extrude / edges): rebuild silently — no full-screen overlay.
+  } else if (isInitialLoad) {
     store.set({ status: 'Building clicker…' });
   } else {
     store.set({ building: true, status: 'Building clicker…' });
@@ -687,6 +814,9 @@ function debounce(fn: () => void, ms: number) {
   };
 }
 const debouncedRebuild = debounce(rebuild, 130);
+// Quiet rebuild used by live edit modes (extrude / edges) so the preview reflects
+// the real geometry without flashing the loading overlay on every step.
+const debouncedQuietRebuild = debounce(() => rebuild(true), 160);
 const debouncedReprocess = debounce(reprocess, 220);
 
 function hexToRgb(hex: string): RGB {

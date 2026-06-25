@@ -345,22 +345,17 @@ export function buildClicker(
     let inlay: Solid = extrudeAt(fp, topZ - bottomZ, bottomZ);
     if (inlay.isEmpty()) continue;
 
-    // Apply specific edge setting if configured
+    // Round (fillet) or bevel (chamfer) the TOP edge of this color part if the
+    // user configured it in Edges mode. A real swept profile — not a single
+    // rectangular notch — so fillet actually curves and chamfer actually angles.
     const es = params.edgeSettings?.find(s => s.target === r.partName);
     if (es && es.style !== 'none' && es.radius >= 0.05) {
-      const radius = Math.min(es.radius, (topZ - bottomZ) * 0.3, 2.5);
+      // The bevel can't exceed roughly half the part's height, so on a flat color
+      // layer it stays subtle; extrude the part first for a bigger fillet.
+      const radius = Math.min(es.radius, (topZ - bottomZ) * 0.49, 3.0);
       if (radius >= 0.05) {
-        const shrunk = track(fp.offset(-radius, 'Round', 2.0, 64));
-        if (!sectionIsEmpty(shrunk)) {
-          const ring = track(fp.subtract(shrunk));
-          if (es.style === 'chamfer') {
-            const modBlock = extrudeAt(ring, radius + 0.02, topZ - radius);
-            inlay = track(inlay.subtract(modBlock));
-          } else if (es.style === 'fillet') {
-            const modBlock = extrudeAt(ring, radius + 0.02, topZ - radius);
-            inlay = track(inlay.subtract(modBlock));
-          }
-        }
+        const modBlock = createEdgeBevelBlock(fp, radius, es.style, topZ, false);
+        if (modBlock) inlay = track(inlay.subtract(modBlock));
       }
     }
 
@@ -437,13 +432,14 @@ export function buildClicker(
     parts.push(toPart(body, 'body', 'base', params.bodyColorRgb, 'base-body'));
   }
 
-  // --- Cap edge modifications ---
+  // --- Cap edge modifications. 'capTop' is the global cap-top edge; 'top-base' is
+  //     the cap frame selected directly in Edges mode. Both round the cap's top rim. ---
   if (parts.length > 0) {
     const basePartIdx = parts.findIndex(p => p.name === 'top-base');
     if (basePartIdx >= 0) {
       for (const es of params.edgeSettings) {
-        if (es.target === 'capTop') {
-          const r = Math.min(es.radius, backing * 0.4, 2.0);
+        if ((es.target === 'capTop' || es.target === 'top-base') && es.style !== 'none') {
+          const r = Math.min(es.radius, (backing + imageDepth) * 0.4, 2.5);
           if (r > 0.05) {
             const modBlock = createEdgeBevelBlock(plate, r, es.style, slabTopZ, false);
             if (modBlock) {
@@ -466,7 +462,10 @@ export function buildClicker(
 
   return parts;
 
-  /** Apply fillet/chamfer edge modifications to the body solid. */
+  /** Apply fillet/chamfer edge modifications to the body solid.
+   *  Targets: 'baseTop'/'baseBottom' are the global body edges; 'base-body' is the
+   *  body part selected directly in Edges mode (rounds its top rim). Cap and inlay
+   *  targets are handled elsewhere. */
   function applyEdges(
     bodyIn: Solid,
     edgeSettings: EdgeSetting[],
@@ -478,20 +477,16 @@ export function buildClicker(
     let result = bodyIn;
     for (const es of edgeSettings) {
       if (es.style === 'none' || es.radius < 0.05) continue;
-      if (es.target === 'capTop') continue; // handled separately on the cap
+      const isBodyTop = es.target === 'baseTop' || es.target === 'base-body';
+      const isBodyBottom = es.target === 'baseBottom';
+      if (!isBodyTop && !isBodyBottom) continue; // cap / inlay targets handled elsewhere
       const r = Math.min(es.radius, (topZ - bottomZ) * 0.3, 2.5);
       if (r < 0.05) continue;
 
-      // Shrink the footprint inward by `r` to get the "inner" edge
-      const inner = track(footprint.offset(-r, 'Round', 2.0, 64));
-      if (sectionIsEmpty(inner)) continue;
-
-      if (es.target === 'baseTop') {
-        // Remove material from the top edge of the body
+      if (isBodyTop) {
         const modBlock = createEdgeBevelBlock(footprint, r, es.style, topZ, false);
         if (modBlock) result = track(result.subtract(modBlock));
-      } else if (es.target === 'baseBottom') {
-        // Remove material from the bottom edge of the body
+      } else {
         const modBlock = createEdgeBevelBlock(footprint, r, es.style, bottomZ, true);
         if (modBlock) result = track(result.subtract(modBlock));
       }
