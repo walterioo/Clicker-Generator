@@ -14,8 +14,21 @@ export interface Viewer {
   showSwitch(on: boolean): void;
   renderToPng(): Promise<Blob | null>;
   setTheme(theme: string): void;
+  /** Register a callback fired when the user clicks a colored part of the model. */
+  onPartPick(cb: (index: number, clientX: number, clientY: number) => void): void;
+  /** Live-recolor a single part's material (no rebuild — geometry is unchanged). */
+  setPartColor(index: number, rgb: RGB): void;
+  /** Mark a part as the active selection (highlight), or null to clear. */
+  highlightPart(index: number | null): void;
+  /** Clear hover + selection highlights. */
+  clearHighlight(): void;
   dispose(): void;
 }
+
+// The grid sits a hair BELOW the model's bottom face (which lands at z = 0) so the
+// solid bottom occludes it cleanly — coplanar at z = 0 causes z-fighting that bleeds
+// grid lines up through the lower body.
+const GRID_GAP = 0.3;
 
 function partToGeometry(p: ClickerPart): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
@@ -55,6 +68,9 @@ export function createViewer(container: HTMLElement): Viewer {
   // Section view: a single clipping plane swept along an axis.
   const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
   const materials: THREE.Material[] = [];
+  // Parallel to `materials`/parts: the pickable meshes, each tagged with its part
+  // index in userData so a raycast hit maps straight back to the part/material.
+  const partMeshes: THREE.Mesh[] = [];
   const bounds = new THREE.Vector3(40, 40, 40);
   let sectionAxis: SectionAxis = 'y';
   let sectionPos = 0;
@@ -109,9 +125,87 @@ export function createViewer(container: HTMLElement): Viewer {
   switchGroup.visible = false;
   root.add(capGroup, bodyGroup, switchGroup);
 
+  // Instant placeholder clicker so the viewport is never empty while the WASM
+  // kernel + switch assets load. It's a plain round cap built from three.js
+  // primitives (no worker, no build) and is removed the moment real parts land.
+  let placeholder: THREE.Group | null = buildPlaceholder();
+  root.add(placeholder);
+  framePlaceholder();
+
   let viewMode: ViewMode = 'assembled';
   let explodeOffset = 0;
   let switchMaterial: THREE.MeshStandardMaterial | null = null;
+
+  // ---- Part picking / hover / selection ----
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  const HILITE = new THREE.Color(0x3b82f6);
+  let hoveredIndex: number | null = null;
+  let selectedIndex: number | null = null;
+  let pickCb: ((index: number, clientX: number, clientY: number) => void) | null = null;
+  let downX = 0;
+  let downY = 0;
+  let downT = 0;
+
+  // A plain, pre-built round clicker used as the at-rest placeholder. Pure
+  // three.js geometry so it renders instantly on first paint.
+  function buildPlaceholder(): THREE.Group {
+    const g = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: color([120, 124, 130]),
+      metalness: 0.0,
+      roughness: 0.55,
+    });
+    const capMat = new THREE.MeshStandardMaterial({
+      color: color([90, 158, 255]),
+      metalness: 0.0,
+      roughness: 0.45,
+    });
+
+    // Body slab (z 0 → 8).
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(20, 20, 8, 64), bodyMat);
+    body.rotation.x = Math.PI / 2;
+    body.position.z = 4;
+    g.add(body);
+
+    // Cap (z 8 → 13).
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(18.5, 19.5, 5, 64), capMat);
+    cap.rotation.x = Math.PI / 2;
+    cap.position.z = 10.5;
+    g.add(cap);
+
+    // Subtle dome so it reads as a flat-topped keycap rather than a coin.
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(18.5, 64, 24, 0, Math.PI * 2, 0, Math.PI / 2),
+      capMat,
+    );
+    dome.scale.set(1, 1, 0.08);
+    dome.rotation.x = Math.PI / 2;
+    dome.position.z = 13;
+    g.add(dome);
+
+    return g;
+  }
+
+  function framePlaceholder() {
+    root.position.set(0, 0, 0);
+    const radius = 40 * 1.4 + 10;
+    camera.position.set(radius, -radius, radius * 0.75);
+    controls.target.set(0, 0, 7);
+    controls.update();
+  }
+
+  function clearPlaceholder() {
+    if (!placeholder) return;
+    root.remove(placeholder);
+    for (const child of placeholder.children) {
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        (child.material as THREE.Material).dispose();
+      }
+    }
+    placeholder = null;
+  }
 
   function clearGroup(g: THREE.Group) {
     for (const child of [...g.children]) {
@@ -124,11 +218,16 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function setParts(parts: ClickerPart[]) {
+    clearPlaceholder();
     clearGroup(capGroup);
     clearGroup(bodyGroup);
     materials.length = 0;
+    partMeshes.length = 0;
+    hoveredIndex = null;
+    selectedIndex = null;
 
-    for (const p of parts) {
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
       const mat = new THREE.MeshStandardMaterial({
         color: color(p.colorRgb),
         metalness: 0.0,
@@ -137,6 +236,8 @@ export function createViewer(container: HTMLElement): Viewer {
       });
       materials.push(mat);
       const mesh = new THREE.Mesh(partToGeometry(p), mat);
+      mesh.userData.partIndex = i; // raycast hit -> part/material index
+      partMeshes.push(mesh);
       (p.kind === 'body' ? bodyGroup : capGroup).add(mesh);
     }
 
@@ -153,9 +254,10 @@ export function createViewer(container: HTMLElement): Viewer {
     explodeOffset = size.z * 0.8 + 10;
     applyView();
 
-    // Grid sits at z = 0 — the bottom face of the clicker lands exactly here.
+    // Drop the grid just under the model's bottom (which lands at z = 0) so the
+    // solid base occludes it instead of z-fighting with the coplanar bottom face.
     const activeTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-    rebuildGrid(activeTheme, 0);
+    rebuildGrid(activeTheme, -GRID_GAP);
 
     const radius = Math.max(size.x, size.y, size.z) * 1.4 + 10;
     camera.position.set(radius, -radius, radius * 0.75);
@@ -250,9 +352,97 @@ export function createViewer(container: HTMLElement): Viewer {
     renderer.render(scene, camera);
   })();
 
+  // Paint hover/selection glow via emissive (keeps each part's true base color).
+  function applyHighlight() {
+    for (let i = 0; i < materials.length; i++) {
+      const m = materials[i] as THREE.MeshStandardMaterial;
+      if (!m || !m.emissive) continue;
+      if (i === selectedIndex) {
+        m.emissive.copy(HILITE);
+        m.emissiveIntensity = 0.35;
+      } else if (i === hoveredIndex) {
+        m.emissive.copy(HILITE);
+        m.emissiveIntensity = 0.18;
+      } else {
+        m.emissive.setRGB(0, 0, 0);
+        m.emissiveIntensity = 1;
+      }
+    }
+  }
+
+  function pickIndexAt(clientX: number, clientY: number): number | null {
+    if (partMeshes.length === 0) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(partMeshes, false);
+    for (const h of hits) {
+      const idx = (h.object.userData as { partIndex?: number }).partIndex;
+      if (typeof idx === 'number') return idx;
+    }
+    return null;
+  }
+
+  const onPointerMove = (e: PointerEvent) => {
+    if (e.buttons !== 0) return; // mid orbit/pan — don't fight the controls
+    const idx = pickIndexAt(e.clientX, e.clientY);
+    renderer.domElement.style.cursor = idx === null ? '' : 'pointer';
+    if (idx !== hoveredIndex) {
+      hoveredIndex = idx;
+      applyHighlight();
+    }
+  };
+  const onPointerLeave = () => {
+    if (hoveredIndex !== null) {
+      hoveredIndex = null;
+      applyHighlight();
+    }
+  };
+  const onPointerDown = (e: PointerEvent) => {
+    downX = e.clientX;
+    downY = e.clientY;
+    downT = performance.now();
+  };
+  const onPointerUp = (e: PointerEvent) => {
+    // Only a tap (not an orbit drag) counts as a part click.
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) return;
+    if (performance.now() - downT > 500) return;
+    const idx = pickIndexAt(e.clientX, e.clientY);
+    if (idx === null) return;
+    selectedIndex = idx;
+    applyHighlight();
+    pickCb?.(idx, e.clientX, e.clientY);
+  };
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
+  renderer.domElement.addEventListener('pointerleave', onPointerLeave);
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  renderer.domElement.addEventListener('pointerup', onPointerUp);
+
+  function onPartPick(cb: (index: number, clientX: number, clientY: number) => void) {
+    pickCb = cb;
+  }
+  function setPartColor(index: number, rgb: RGB) {
+    const m = materials[index] as THREE.MeshStandardMaterial | undefined;
+    if (m) m.color = color(rgb);
+  }
+  function highlightPart(index: number | null) {
+    selectedIndex = index;
+    applyHighlight();
+  }
+  function clearHighlight() {
+    selectedIndex = null;
+    hoveredIndex = null;
+    applyHighlight();
+  }
+
   function dispose() {
     cancelAnimationFrame(raf);
     window.removeEventListener('resize', onResize);
+    renderer.domElement.removeEventListener('pointermove', onPointerMove);
+    renderer.domElement.removeEventListener('pointerleave', onPointerLeave);
+    renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+    renderer.domElement.removeEventListener('pointerup', onPointerUp);
     clearGroup(capGroup);
     clearGroup(bodyGroup);
     clearGroup(switchGroup);
@@ -267,5 +457,18 @@ export function createViewer(container: HTMLElement): Viewer {
     rebuildGrid(theme, gridZ);
   }
 
-  return { setParts, setView, setSection, setSwitch, showSwitch, renderToPng, setTheme, dispose };
+  return {
+    setParts,
+    setView,
+    setSection,
+    setSwitch,
+    showSwitch,
+    renderToPng,
+    setTheme,
+    onPartPick,
+    setPartColor,
+    highlightPart,
+    clearHighlight,
+    dispose,
+  };
 }

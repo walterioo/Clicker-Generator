@@ -29,11 +29,13 @@ export interface UiState {
   limitedColors: RGB[];
   bodyColorRgb: RGB;
   paletteOverrides: RGB[];
+  /** Explicit cap-backing/frame color set by clicking it on the model (else derived). */
+  baseColorOverride: RGB | null;
 }
 
 export interface UiCallbacks {
   onUpload(file: File): void;
-  onSample(creator: () => RgbaImage): void;
+  onSample(load: () => Promise<RgbaImage>): void;
   onColorCount(n: number): void;
   onSmoothing(v: number): void;
   onFilament(index: number, hex: string): void;
@@ -359,7 +361,7 @@ export function createUi(
           <div class="sample-grid">
             ${SAMPLES.map((s, idx) => `
               <div class="sample-item" data-idx="${idx}">
-                <canvas width="80" height="80" style="width: 80px; height: 80px;"></canvas>
+                <img src="${s.src}" width="80" height="80" alt="${s.name}" style="width: 80px; height: 80px; object-fit: contain;" />
                 <span>${s.name}</span>
               </div>
             `).join('')}
@@ -372,27 +374,11 @@ export function createUi(
     `;
     document.body.appendChild(modal);
 
-    SAMPLES.forEach((s, idx) => {
-      const item = modal.querySelector(`.sample-item[data-idx="${idx}"]`)!;
-      const canvas = item.querySelector('canvas')!;
-      const ctx = canvas.getContext('2d')!;
-      const imgData = s.creator();
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = imgData.width;
-      tempCanvas.height = imgData.height;
-      tempCanvas.getContext('2d')!.putImageData(
-        new ImageData(new Uint8ClampedArray(imgData.data), imgData.width, imgData.height),
-        0,
-        0
-      );
-      ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
-    });
-
     modal.addEventListener('click', (e) => {
       const item = (e.target as HTMLElement).closest('.sample-item') as HTMLElement | null;
       if (item) {
         const idx = parseInt(item.dataset.idx!);
-        cb.onSample(SAMPLES[idx].creator);
+        cb.onSample(SAMPLES[idx].load);
         modal.remove();
       }
     });
@@ -446,7 +432,7 @@ export function createUi(
     return el;
   }
 
-  function addUploadedSvg(svgText: string, name: string) {
+  function addUploadedSvg(svgText: string, name: string, select = true) {
     const blob = new Blob([svgText], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
     const el = makeIconEl(url, name, (clickedEl) => {
@@ -456,7 +442,7 @@ export function createUi(
     });
     uploadGalleryEl.appendChild(el);
     refreshUploadEmptyState();
-    el.click();
+    if (select) el.click();
   }
 
   // --- Lucide Icon Panel Setup ---
@@ -748,49 +734,80 @@ export function createUi(
     return [bestName, bestHex];
   }
 
+  // Robust floating swatch picker. Anchored at (clientX, clientY) — typically the
+  // cursor or a trigger element's corner — then measured and clamped so it always
+  // stays fully on-screen (the old version could land in the top-left corner).
+  function showColorPopoverAt(
+    clientX: number,
+    clientY: number,
+    currentHex: string,
+    options: RGB[],
+    handlers: { onSelect: (hex: string) => void; onClose?: () => void }
+  ) {
+    document.getElementById('sbColorPopover')?.remove();
+
+    const popover = document.createElement('div');
+    popover.id = 'sbColorPopover';
+    popover.className = 'color-popover';
+    document.body.appendChild(popover);
+
+    let done = false;
+    const close = () => {
+      if (done) return;
+      done = true;
+      popover.remove();
+      document.removeEventListener('mousedown', dismiss);
+      handlers.onClose?.();
+    };
+
+    options.forEach((rgb) => {
+      const hex = rgbHex(rgb);
+      const [name] = getFilamentNameAndHex(rgb);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.style.background = hex;
+      btn.title = name;
+      if (hex.toLowerCase() === currentHex.toLowerCase()) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        handlers.onSelect(hex);
+        close();
+      });
+      popover.appendChild(btn);
+    });
+
+    // Custom color: live-updates while dragging, stays open until dismissed.
+    const custom = document.createElement('label');
+    custom.className = 'cp-custom';
+    custom.title = 'Custom color';
+    const inp = document.createElement('input');
+    inp.type = 'color';
+    inp.value = /^#[0-9a-f]{6}$/i.test(currentHex) ? currentHex : '#888888';
+    inp.addEventListener('input', () => handlers.onSelect(inp.value));
+    custom.appendChild(inp);
+    popover.appendChild(custom);
+
+    // Measure now that it's populated, then clamp into the viewport.
+    const w = popover.offsetWidth || 170;
+    const h = popover.offsetHeight || 180;
+    popover.style.left = `${Math.max(8, Math.min(clientX, window.innerWidth - w - 8))}px`;
+    popover.style.top = `${Math.max(8, Math.min(clientY, window.innerHeight - h - 8))}px`;
+
+    const dismiss = (e: MouseEvent) => {
+      if (!popover.contains(e.target as Node)) close();
+    };
+    setTimeout(() => document.addEventListener('mousedown', dismiss), 50);
+  }
+
   function showSidebarColorPicker(
     triggerEl: HTMLElement,
     currentHex: string,
     options: [string, string][],
     onSelect: (hex: string) => void
   ) {
-    const existing = document.getElementById('sbColorPopover');
-    if (existing) existing.remove();
-
     const rect = triggerEl.getBoundingClientRect();
-
-    const popover = document.createElement('div');
-    popover.id = 'sbColorPopover';
-    popover.className = 'color-popover';
-    popover.style.left = `${Math.min(rect.left, window.innerWidth - 190)}px`;
-    popover.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 180)}px`;
-
-    options.forEach(([name, hex]) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.style.background = hex;
-      if (hex.toLowerCase() === currentHex.toLowerCase()) {
-        btn.classList.add('active');
-      }
-      btn.title = name;
-      btn.addEventListener('click', () => {
-        onSelect(hex);
-        popover.remove();
-      });
-      popover.appendChild(btn);
+    showColorPopoverAt(rect.left, rect.bottom + 6, currentHex, options.map(([, hex]) => hexRgb(hex)), {
+      onSelect,
     });
-
-    const dismiss = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node) && !triggerEl.contains(e.target as Node)) {
-        popover.remove();
-        document.removeEventListener('mousedown', dismiss);
-      }
-    };
-    setTimeout(() => {
-      document.addEventListener('mousedown', dismiss);
-    }, 50);
-
-    document.body.appendChild(popover);
   }
 
   function renderPalette(palette: PaletteEntry[], bodyColorRgb: RGB, colorMode?: 'normal' | 'limited', limitedColors?: RGB[]) {
@@ -867,6 +884,11 @@ export function createUi(
         );
         pal.appendChild(row);
       });
+
+      const tip = document.createElement('div');
+      tip.className = 'hint model-recolor-tip';
+      tip.textContent = 'Tip: click any color on the 3D model to recolor it.';
+      pal.appendChild(tip);
     }
   }
 
@@ -923,17 +945,21 @@ export function createUi(
     if (ccountField) ccountField.style.display = showSmoothingAndBg ? 'grid' : 'none';
     if (smoothingField) smoothingField.style.display = showSmoothingAndBg ? 'grid' : 'none';
 
-    // Update Shape controls
-    const isOutline = state.baseShape === 'outline';
+    // Update Shape controls. Icons can't use the outline style (their thin
+    // line-art makes a broken body), so the Outline tab is hidden for icon mode
+    // and the body is always a solid shape.
+    const outlineTab = shapeTypeTabs.querySelector<HTMLElement>('[data-style="outline"]');
+    if (outlineTab) outlineTab.style.display = state.importMode === 'icon' ? 'none' : '';
+    const treatAsOutline = state.baseShape === 'outline' && state.importMode !== 'icon';
     for (const btn of shapeTypeTabs.querySelectorAll<HTMLElement>('button')) {
-      btn.classList.toggle('active', btn.dataset.style === (isOutline ? 'outline' : 'shape'));
+      btn.classList.toggle('active', btn.dataset.style === (treatAsOutline ? 'outline' : 'shape'));
     }
 
-    if (isOutline) {
+    if (treatAsOutline) {
       shapeSelect.disabled = true;
     } else {
       shapeSelect.disabled = false;
-      shapeSelect.value = state.baseShape;
+      shapeSelect.value = state.baseShape === 'outline' ? 'circle' : state.baseShape;
     }
 
     // Update View tabs
@@ -968,5 +994,5 @@ export function createUi(
     }
   }
 
-  return { update, hexRgb, addUploadedSvg, addFontOption: (font: FontOption) => { addFontOption(font); fontSelect.value = font.id; } };
+  return { update, hexRgb, showColorPopoverAt, addUploadedSvg, addFontOption: (font: FontOption) => { addFontOption(font); fontSelect.value = font.id; } };
 }

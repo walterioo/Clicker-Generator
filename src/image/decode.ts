@@ -15,6 +15,19 @@ export async function loadFileToImage(file: File, maxSize = 1100): Promise<RgbaI
   }
 }
 
+// Decode an image URL (e.g. a bundled sample asset) into downscaled ImageData.
+export async function loadUrlToImage(url: string, maxSize = 1100): Promise<RgbaImage> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to load image: ${url} (${res.status})`);
+  const blob = await res.blob();
+  const bitmap = await createImageBitmap(blob);
+  try {
+    return drawToImageData(bitmap, bitmap.width, bitmap.height, maxSize);
+  } finally {
+    bitmap.close();
+  }
+}
+
 export function drawToImageData(
   src: CanvasImageSource,
   srcW: number,

@@ -358,48 +358,70 @@ export function runWizard(opts: WizardOpts) {
     overlay.querySelector('#wzNext')!.addEventListener('click', stepRecolor);
   }
 
+  // Floating swatch picker anchored at a viewport point (cursor or trigger corner),
+  // then measured and clamped so it never lands off-screen / in the top-left corner.
+  function showWizardColorPickerAt(
+    clientX: number,
+    clientY: number,
+    currentHex: string,
+    onSelect: (hex: string) => void
+  ) {
+    document.getElementById('wzColorPopover')?.remove();
+
+    const popover = document.createElement('div');
+    popover.id = 'wzColorPopover';
+    popover.className = 'color-popover';
+    document.body.appendChild(popover);
+
+    let done = false;
+    const close = () => {
+      if (done) return;
+      done = true;
+      popover.remove();
+      document.removeEventListener('mousedown', dismiss);
+    };
+
+    const options = colorMode === 'limited' ? limitedColors : FILAMENTS.map((f) => hexRgb(f[1]));
+    options.forEach((rgb) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.style.background = rgbHex(rgb);
+      if (rgbHex(rgb).toLowerCase() === currentHex.toLowerCase()) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        onSelect(rgbHex(rgb));
+        close();
+      });
+      popover.appendChild(btn);
+    });
+
+    const custom = document.createElement('label');
+    custom.className = 'cp-custom';
+    custom.title = 'Custom color';
+    const inp = document.createElement('input');
+    inp.type = 'color';
+    inp.value = /^#[0-9a-f]{6}$/i.test(currentHex) ? currentHex : '#888888';
+    inp.addEventListener('input', () => onSelect(inp.value));
+    custom.appendChild(inp);
+    popover.appendChild(custom);
+
+    const w = popover.offsetWidth || 170;
+    const h = popover.offsetHeight || 180;
+    popover.style.left = `${Math.max(8, Math.min(clientX, window.innerWidth - w - 8))}px`;
+    popover.style.top = `${Math.max(8, Math.min(clientY, window.innerHeight - h - 8))}px`;
+
+    const dismiss = (e: MouseEvent) => {
+      if (!popover.contains(e.target as Node)) close();
+    };
+    setTimeout(() => document.addEventListener('mousedown', dismiss), 50);
+  }
+
   function showWizardColorPicker(
     triggerEl: HTMLElement,
     currentHex: string,
     onSelect: (hex: string) => void
   ) {
-    const existing = document.getElementById('wzColorPopover');
-    if (existing) existing.remove();
-
     const rect = triggerEl.getBoundingClientRect();
-    const popover = document.createElement('div');
-    popover.id = 'wzColorPopover';
-    popover.className = 'color-popover';
-    popover.style.left = `${Math.min(rect.left, window.innerWidth - 190)}px`;
-    popover.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 180)}px`;
-
-    const options = colorMode === 'limited' ? limitedColors : FILAMENTS.map(f => hexRgb(f[1]));
-
-    options.forEach((rgb) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.style.background = rgbHex(rgb);
-      if (rgbHex(rgb).toLowerCase() === currentHex.toLowerCase()) {
-        btn.classList.add('active');
-      }
-      btn.addEventListener('click', () => {
-        onSelect(rgbHex(rgb));
-        popover.remove();
-      });
-      popover.appendChild(btn);
-    });
-
-    const dismiss = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node) && !triggerEl.contains(e.target as Node)) {
-        popover.remove();
-        document.removeEventListener('mousedown', dismiss);
-      }
-    };
-    setTimeout(() => {
-      document.addEventListener('mousedown', dismiss);
-    }, 50);
-
-    document.body.appendChild(popover);
+    showWizardColorPickerAt(rect.left, rect.bottom + 6, currentHex, onSelect);
   }
 
   // ---------- Step 2: Recolor & Customize ----------
@@ -513,29 +535,13 @@ export function runWizard(opts: WizardOpts) {
             activeColorIdx = colorIdx;
             drawCanvas();
             renderSlots();
-            
-            const mockTrigger = document.createElement('div');
-            mockTrigger.style.position = 'fixed';
-            mockTrigger.style.left = `${e.clientX}px`;
-            mockTrigger.style.top = `${e.clientY}px`;
-            document.body.appendChild(mockTrigger);
-            
+
             const currentHex = rgbHex(wizardPaletteOverrides[colorIdx] || q.palette[colorIdx].rgb);
-            showWizardColorPicker(mockTrigger, currentHex, (hex) => {
+            showWizardColorPickerAt(e.clientX, e.clientY, currentHex, (hex) => {
               wizardPaletteOverrides[colorIdx] = hexRgb(hex);
               drawCanvas();
               renderSlots();
-              mockTrigger.remove();
             });
-
-            const checkDismiss = () => {
-              if (!document.getElementById('wzColorPopover')) {
-                mockTrigger.remove();
-              } else {
-                setTimeout(checkDismiss, 100);
-              }
-            };
-            setTimeout(checkDismiss, 100);
           }
         }
       });

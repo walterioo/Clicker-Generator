@@ -2,7 +2,13 @@ import * as THREE from 'three';
 import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import type { RegionSet, Ring, RGB } from '../types';
 
+// Default ink for paths whose color we can't resolve (e.g. Lucide icons use
+// `stroke="currentColor"`, which isn't a real color). Dark so the design is
+// visible as an inlay on the light cap — white-on-white made icons disappear.
+const DEFAULT_INK: RGB = [22, 22, 22];
+
 function parseColor(colorStr: string): RGB {
+  if (!colorStr || colorStr === 'currentColor') return DEFAULT_INK;
   try {
     const c = new THREE.Color(colorStr);
     return [
@@ -11,7 +17,7 @@ function parseColor(colorStr: string): RGB {
       Math.round(c.b * 255)
     ];
   } catch {
-    return [255, 255, 255]; // fallback
+    return DEFAULT_INK; // fallback
   }
 }
 

@@ -7,6 +7,7 @@ import { processImage } from './image/pipeline';
 import { runWizard } from './ui/wizard';
 import { downloadThreeMF } from './export/threemfExport';
 import { parseSvg } from './image/logo';
+import { SVG_SAMPLES } from './image/sample';
 import { parseLetter, importFontFile } from './image/letter';
 import { LUCIDE_ICONS, buildSvg } from './image/lucideIcons';
 import type {
@@ -18,6 +19,10 @@ import type {
   RegionSet,
   RGB,
 } from './types';
+import { FILAMENTS } from './types';
+
+/** Which editable color a clicked model part maps back to. */
+type ColorTarget = { kind: 'region'; index: number } | { kind: 'body' } | { kind: 'base' };
 
 // ---- State (UI-facing) ----
 const store = createStore<UiState>({
@@ -42,6 +47,7 @@ const store = createStore<UiState>({
   limitedColors: [],
   bodyColorRgb: [120, 124, 130] as RGB,
   paletteOverrides: [],
+  baseColorOverride: null,
 });
 
 // ---- Heavy data kept out of the reactive store ----
@@ -81,7 +87,7 @@ const viewer = createViewer(document.getElementById('app')!);
 
 const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
   onUpload: (file) => openWizard(() => loadFileToImage(file)),
-  onSample: (creator) => openWizard(async () => creator()),
+  onSample: (load) => openWizard(load),
   onColorCount: (n) => {
     store.set({ colorCount: n });
     debouncedReprocess();
@@ -230,6 +236,89 @@ const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
 store.subscribe((s) => ui.update(s));
 ui.update(store.get());
 
+// ---- Click a colored region on the 3D model to recolor it (live, no rebuild) ----
+viewer.onPartPick((index, clientX, clientY) => {
+  const part = latestParts[index];
+  if (!part) {
+    viewer.clearHighlight();
+    return;
+  }
+  const target = partColorTarget(part.name);
+  if (!target) {
+    viewer.clearHighlight();
+    return;
+  }
+  const s = store.get();
+  const options: RGB[] =
+    s.colorMode === 'limited' && s.limitedColors.length > 0
+      ? s.limitedColors
+      : FILAMENTS.map(([, hex]) => hexToRgb(hex));
+  ui.showColorPopoverAt(clientX, clientY, rgbToHex(part.colorRgb), options, {
+    onSelect: (hex) => applyModelRecolor(target, hexToRgb(hex), index),
+    onClose: () => viewer.clearHighlight(),
+  });
+});
+
+function partColorTarget(name: string): ColorTarget | null {
+  if (name === 'base-body') return { kind: 'body' };
+  if (name === 'top-base') return { kind: 'base' };
+  const m = /^top-color-(\d+)$/.exec(name);
+  return m ? { kind: 'region', index: +m[1] } : null;
+}
+
+// Apply a recolor to the clicked part: update the live material + export data, and
+// persist into store state so it survives rebuilds. Geometry is identical for a
+// color change, so we deliberately skip the worker rebuild.
+function applyModelRecolor(target: ColorTarget, rgb: RGB, partIndex: number) {
+  viewer.setPartColor(partIndex, rgb);
+  if (latestParts[partIndex]) latestParts[partIndex] = { ...latestParts[partIndex], colorRgb: rgb };
+
+  const s = store.get();
+  if (target.kind === 'region') {
+    const palette = s.palette.slice();
+    if (palette[target.index]) palette[target.index] = { ...palette[target.index], filamentRgb: rgb };
+    const overrides = s.paletteOverrides.slice();
+    overrides[target.index] = rgb;
+    store.set({ palette, paletteOverrides: overrides });
+    syncBaseColor(); // the cap frame mirrors the dominant region — keep it in step
+  } else if (target.kind === 'body') {
+    store.set({ bodyColorRgb: rgb });
+  } else {
+    store.set({ baseColorOverride: rgb });
+  }
+}
+
+// The cap backing/frame color is derived from the dominant region (unless the user
+// pinned it). After a region recolor, repaint the frame part to match — live, no
+// rebuild — so it never lags a frame behind the inlay it shares a color with.
+function syncBaseColor() {
+  const s = store.get();
+  if (s.baseColorOverride || s.importMode === 'icon' || s.palette.length === 0) return;
+  let domIdx = 0;
+  for (let i = 1; i < s.palette.length; i++) {
+    if (s.palette[i].coverage > s.palette[domIdx].coverage) domIdx = i;
+  }
+  const baseRgb = s.palette[domIdx]?.filamentRgb;
+  if (!baseRgb) return;
+  const bi = latestParts.findIndex((p) => p.name === 'top-base');
+  if (bi >= 0) {
+    latestParts[bi] = { ...latestParts[bi], colorRgb: baseRgb };
+    viewer.setPartColor(bi, baseRgb);
+  }
+}
+
+// Seed the SVG panel with bundled vector presets (added quietly, not selected).
+(async function loadSvgSamples() {
+  for (const sample of SVG_SAMPLES) {
+    try {
+      const svgText = await fetch(sample.src).then((r) => r.text());
+      ui.addUploadedSvg(svgText, sample.name, false);
+    } catch (err) {
+      console.warn('Could not load SVG sample', sample.name, err);
+    }
+  }
+})();
+
 // ---- Geometry worker ----
 const worker = new Worker(new URL('./workers/geometry.worker.ts', import.meta.url), {
   type: 'module',
@@ -337,6 +426,8 @@ async function openWizard(getter: () => Promise<RgbaImage>) {
 }
 
 function reprocess() {
+  // A fresh trace means fresh regions — drop any pinned frame color so it re-derives.
+  store.set({ baseColorOverride: null });
   const s = store.get();
 
   if (s.importMode === 'image') {
@@ -427,8 +518,20 @@ function rebuild() {
     rings: r.rings,
   }));
 
+  // Icons are line-art (a single-color silhouette), not a multi-color picture.
+  // Using their thin stroke as the body outline makes a broken ring, so the body
+  // is always a solid shape (circle/square) and the icon rides on top as a design.
+  // The cap base then needs a background distinct from the dark icon ink.
+  const isIcon = s.importMode === 'icon';
+  const effectiveBaseShape = isIcon && s.baseShape === 'outline' ? 'circle' : s.baseShape;
+  const defaultBaseColor: RGB = isIcon
+    ? ([240, 240, 240] as RGB)
+    : (s.palette[domIdx]?.filamentRgb ?? ([180, 180, 185] as RGB));
+  // A frame color the user pinned by clicking it on the model wins over the derived one.
+  const capBaseColor: RGB = s.baseColorOverride ?? defaultBaseColor;
+
   const params: BuildParams = {
-    baseShape: s.baseShape,
+    baseShape: effectiveBaseShape,
     capWidthMm: s.capWidthMm,
     topThickness: Math.max(1, s.topThickness),
     imageDepth: s.imageDepth,
@@ -441,7 +544,7 @@ function rebuild() {
     travel: 4.0,
     floorThickness: 1.6,
     keychainHole: s.keychain,
-    baseFilamentRgb: s.palette[domIdx]?.filamentRgb ?? ([180, 180, 185] as RGB),
+    baseFilamentRgb: capBaseColor,
     bodyColorRgb: s.bodyColorRgb ?? ([120, 124, 130] as RGB),
   };
 
@@ -470,6 +573,12 @@ function hexToRgb(hex: string): RGB {
     parseInt(hex.slice(3, 5), 16),
     parseInt(hex.slice(5, 7), 16),
   ];
+}
+function rgbToHex(rgb: RGB): string {
+  return (
+    '#' +
+    rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')
+  );
 }
 function firstLine(s: string): string {
   return s.split('\n')[0];
@@ -536,6 +645,7 @@ function saveProject() {
       limitedColors: s.limitedColors,
       bodyColorRgb: s.bodyColorRgb,
       paletteOverrides: s.paletteOverrides,
+      baseColorOverride: s.baseColorOverride,
     },
     palette: s.palette, // filament mappings + height levels
     image: originalImage ? imageToDataUrl(originalImage) : null,
@@ -590,7 +700,7 @@ async function loadProject(file: File) {
         filamentRgb: proj.palette[i]?.filamentRgb ?? p.filamentRgb,
         heightLevel: proj.palette[i]?.heightLevel ?? p.heightLevel,
       }));
-      store.set({ palette: pal });
+      store.set({ palette: pal, baseColorOverride: set.baseColorOverride ?? null });
       rebuild();
     }
   } catch (err) {
