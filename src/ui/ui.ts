@@ -31,6 +31,8 @@ export interface UiState {
   paletteOverrides: RGB[];
   /** Explicit cap-backing/frame color set by clicking it on the model (else derived). */
   baseColorOverride: RGB | null;
+  /** Component-specific overrides (key: 'top-color-{colorIndex}-{compIndex}') */
+  partOverrides: Record<string, RGB>;
 }
 
 export interface UiCallbacks {
@@ -115,10 +117,15 @@ export function createUi(
   sidebarLeft.innerHTML = `
     <div class="app-header">
       <h1>Clicker Generator <span class="sub">vector/image → clicker</span></h1>
+      <div class="header-actions">
+      <button id="helpToggle" class="theme-btn help-btn" type="button" title="Show intro &amp; help" aria-label="Show intro and help">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </button>
       <button id="themeToggle" class="theme-btn" type="button" title="Toggle light/dark mode" aria-label="Toggle theme">
         <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
         <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       </button>
+      </div>
     </div>
 
     <div class="section">
@@ -151,10 +158,12 @@ export function createUi(
           <option value="12">12 Colors</option>
         </select>
       </div>
-      <div class="prow" id="smoothingField">
-        <label for="smooth">Smoothing</label>
+      <div class="prow-stacked" id="smoothingField">
+        <div class="prow-header">
+          <label for="smooth">Smoothing</label>
+          <input type="text" class="val" id="smoothVal" />
+        </div>
         <input type="range" id="smooth" min="0" max="1" step="0.05" />
-        <span class="val" id="smoothVal"></span>
       </div>
       <div class="palette" id="palette">
         <div class="hint">Load an image/vector to pick colors.</div>
@@ -177,25 +186,33 @@ export function createUi(
           <option value="square">Square</option>
         </select>
       </div>
-      <div class="prow">
-        <label for="width">Cap width</label>
+      <div class="prow-stacked">
+        <div class="prow-header">
+          <label for="width">Width</label>
+          <input type="text" class="val" id="widthVal" />
+        </div>
         <input type="range" id="width" min="20" max="70" step="1" />
-        <span class="val" id="widthVal"></span>
       </div>
-      <div class="prow">
-        <label for="topthick">Top thickness</label>
+      <div class="prow-stacked">
+        <div class="prow-header">
+          <label for="topthick">Top thickness</label>
+          <input type="text" class="val" id="topthickVal" />
+        </div>
         <input type="range" id="topthick" min="1" max="4" step="0.1" />
-        <span class="val" id="topthickVal"></span>
       </div>
-      <div class="prow">
-        <label for="imgdepth">Image depth</label>
+      <div class="prow-stacked">
+        <div class="prow-header">
+          <label for="imgdepth">Image depth</label>
+          <input type="text" class="val" id="imgdepthVal" />
+        </div>
         <input type="range" id="imgdepth" min="0.2" max="3" step="0.1" />
-        <span class="val" id="imgdepthVal"></span>
       </div>
-      <div class="prow">
-        <label for="tol">Fit tolerance</label>
+      <div class="prow-stacked">
+        <div class="prow-header">
+          <label for="tol">Fit tolerance</label>
+          <input type="text" class="val" id="tolVal" />
+        </div>
         <input type="range" id="tol" min="0.2" max="0.8" step="0.05" />
-        <span class="val" id="tolVal"></span>
       </div>
       <div class="switch-row">
         <span class="switch-label">Keychain loop</span>
@@ -259,10 +276,18 @@ export function createUi(
           <span style="font-size:10px; opacity:0.8; display:block; margin-top:4px;">PNG with transparency works best</span>
         </div>
         <input type="file" id="file" accept="image/*" hidden />
-        <button class="secondary" id="sample" style="width:100%; margin-top:10px">Choose sample image</button>
         <div class="switch-row">
           <span class="switch-label">Remove background</span>
           <label class="toggle"><input id="removebg" type="checkbox" /><span class="slider"></span></label>
+        </div>
+        <span class="sample-heading">Choose a sample image</span>
+        <div class="sample-inline-grid" id="sampleGrid">
+          ${SAMPLES.map((s, idx) => `
+            <div class="sample-inline-item" data-idx="${idx}">
+              <img src="${s.src}" alt="${s.name}" />
+              <span>${s.name}</span>
+            </div>
+          `).join('')}
         </div>
       </div>
 
@@ -309,13 +334,8 @@ export function createUi(
       </div>
     </div>
 
-    <div class="section">
-      <span class="label">Export</span>
+    <div class="sidebar-sticky-footer">
       <button class="primary" id="export" style="width:100%; margin-bottom:10px">Download 3MF</button>
-      <div class="btn-row" style="margin-bottom:8px">
-        <button id="render" class="secondary">Save render PNG</button>
-        <button id="aiPrompt" class="secondary">AI prompt</button>
-      </div>
       <div class="btn-row">
         <button id="saveProj" class="secondary">Save project</button>
         <button id="loadProj" class="secondary">Load project</button>
@@ -351,41 +371,14 @@ export function createUi(
   });
 
   // Choose Sample Picker Modal
-  $('sample').addEventListener('click', () => {
-    const modal = document.createElement('div');
-    modal.className = 'wz-overlay';
-    modal.innerHTML = `
-      <div class="wz-modal" style="width: 460px;">
-        <div class="wz-head">Choose Sample Image</div>
-        <div class="wz-body">
-          <div class="sample-grid">
-            ${SAMPLES.map((s, idx) => `
-              <div class="sample-item" data-idx="${idx}">
-                <img src="${s.src}" width="80" height="80" alt="${s.name}" style="width: 80px; height: 80px; object-fit: contain;" />
-                <span>${s.name}</span>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-        <div class="wz-foot">
-          <button class="secondary" id="closeSampleModal" style="width: auto;">Cancel</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-
-    modal.addEventListener('click', (e) => {
-      const item = (e.target as HTMLElement).closest('.sample-item') as HTMLElement | null;
-      if (item) {
-        const idx = parseInt(item.dataset.idx!);
-        cb.onSample(SAMPLES[idx].load);
-        modal.remove();
-      }
-    });
-
-    modal.querySelector('#closeSampleModal')!.addEventListener('click', () => {
-      modal.remove();
-    });
+  // Inline sample grid: click a thumbnail to load it directly
+  const sampleGrid = $('sampleGrid');
+  sampleGrid.addEventListener('click', (e) => {
+    const item = (e.target as HTMLElement).closest('.sample-inline-item') as HTMLElement | null;
+    if (item) {
+      const idx = parseInt(item.dataset.idx!);
+      cb.onSample(SAMPLES[idx].load);
+    }
   });
 
   $<HTMLInputElement>('removebg').addEventListener('change', (e) =>
@@ -635,6 +628,35 @@ export function createUi(
   const keychain = $<HTMLInputElement>('keychain');
   keychain.addEventListener('change', () => cb.onKeychain(keychain.checked));
 
+  // --- Typeable value inputs: parse typed number, commit on Enter / blur ---
+  function bindValInput(
+    valId: string,
+    slider: HTMLInputElement,
+    callback: (v: number) => void,
+    parse?: (raw: number) => number,
+  ) {
+    const el = $<HTMLInputElement>(valId);
+    const commit = () => {
+      const raw = parseFloat(el.value.replace(/[^0-9.\-]/g, ''));
+      if (isNaN(raw)) return;
+      const v = parse ? parse(raw) : raw;
+      const clamped = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), v));
+      slider.value = String(clamped);
+      callback(clamped);
+    };
+    el.addEventListener('focus', () => el.select());
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); el.blur(); }
+    });
+    el.addEventListener('blur', commit);
+  }
+
+  bindValInput('smoothVal', smooth, cb.onSmoothing, (v) => v / 100);
+  bindValInput('widthVal', width, cb.onWidth);
+  bindValInput('topthickVal', topthick, cb.onTopThickness);
+  bindValInput('imgdepthVal', imgdepth, cb.onImageDepth);
+  bindValInput('tolVal', tol, cb.onTolerance);
+
   // --- View tabs ---
   const viewTabs = $('viewTabs');
   viewTabs.addEventListener('click', (e) => {
@@ -648,8 +670,7 @@ export function createUi(
 
   // --- Export and Utility actions ---
   $('export').addEventListener('click', () => cb.onExport());
-  $('render').addEventListener('click', () => cb.onRenderPng());
-  $('aiPrompt').addEventListener('click', () => cb.onAiPrompt());
+  // render PNG and AI prompt buttons removed per design
   $('saveProj').addEventListener('click', () => cb.onSaveProject());
   const projFile = $<HTMLInputElement>('projFile');
   $('loadProj').addEventListener('click', () => projFile.click());
@@ -665,8 +686,11 @@ export function createUi(
     cb.onThemeChange(next);
   });
 
-  // --- Welcome modal (first launch) ---
-  if (!localStorage.getItem('clicker-welcomed')) {
+  // --- Welcome / intro modal ---
+  // Shown on every load (even on refresh) and re-openable via the header "?" button.
+  function showWelcome() {
+    // Avoid stacking duplicates if the help button is clicked repeatedly.
+    if (document.querySelector('.welcome-overlay')) return;
     const wm = document.createElement('div');
     wm.className = 'welcome-overlay';
     wm.innerHTML = `
@@ -702,18 +726,17 @@ export function createUi(
       </div>
     `;
     document.body.appendChild(wm);
-    wm.querySelector('#welcomeClose')!.addEventListener('click', () => {
-      localStorage.setItem('clicker-welcomed', '1');
-      wm.remove();
-    });
-    // Also dismiss on backdrop click
+    const close = () => wm.remove();
+    wm.querySelector('#welcomeClose')!.addEventListener('click', close);
+    // Also dismiss on backdrop click.
     wm.addEventListener('click', (e) => {
-      if (e.target === wm) {
-        localStorage.setItem('clicker-welcomed', '1');
-        wm.remove();
-      }
+      if (e.target === wm) close();
     });
   }
+
+  // Always greet on load, and let the header "?" button bring it back.
+  showWelcome();
+  $('helpToggle').addEventListener('click', showWelcome);
 
   function getFilamentNameAndHex(rgb: RGB): [string, string] {
     let bestHex = rgbHex(rgb);
@@ -833,8 +856,7 @@ export function createUi(
       <span class="swatch" style="background:#787c82; opacity: 0.5;" title="default body color"></span>
       <span class="arrow">→</span>
       <button type="button" class="fil-chip" title="clicker body color" style="background:${rgbHex(bodyColorRgb)}"></button>
-      <span class="cov">Clicker Body</span>
-      <span class="stepper" style="visibility: hidden;"></span>
+      <span class="cov">Clicker Base</span>
     `;
 
     const bodyChip = bodyRow.querySelector('.fil-chip')!;
@@ -860,13 +882,7 @@ export function createUi(
           <span class="slot-no">${i + 1}</span>
           <span class="swatch" style="background:${rgbHex(entry.quantRgb)}" title="detected color"></span>
           <span class="arrow">→</span>
-          <button type="button" class="fil-chip" title="filament" style="background:${rgbHex(entry.filamentRgb)}"></button>
-          <span class="cov">${Math.round(entry.coverage * 100)}%</span>
-          <span class="stepper" title="3D height (raises this color)">
-            <button class="dn">−</button>
-            <span class="lvl">${entry.heightLevel}</span>
-            <button class="up">+</button>
-          </span>`;
+          <button type="button" class="fil-chip" title="filament" style="background:${rgbHex(entry.filamentRgb)}"></button>`;
 
         const chip = row.querySelector('.fil-chip')!;
         chip.addEventListener('click', (e) => {
@@ -876,12 +892,6 @@ export function createUi(
           });
         });
 
-        row.querySelector<HTMLButtonElement>('.up')!.addEventListener('click', () =>
-          cb.onHeight(i, entry.heightLevel + 1)
-        );
-        row.querySelector<HTMLButtonElement>('.dn')!.addEventListener('click', () =>
-          cb.onHeight(i, entry.heightLevel - 1)
-        );
         pal.appendChild(row);
       });
 
@@ -915,16 +925,20 @@ export function createUi(
       ccount.value = String(state.colorCount);
     }
 
+    const setVal = (id: string, text: string) => {
+      const el = $<HTMLInputElement>(id);
+      if (document.activeElement !== el) el.value = text;
+    };
     smooth.value = String(state.smoothing);
-    $('smoothVal').textContent = Math.round(state.smoothing * 100) + '%';
+    setVal('smoothVal', Math.round(state.smoothing * 100) + '%');
     width.value = String(state.capWidthMm);
-    $('widthVal').textContent = state.capWidthMm + ' mm';
+    setVal('widthVal', state.capWidthMm + ' mm');
     topthick.value = String(state.topThickness);
-    $('topthickVal').textContent = state.topThickness.toFixed(1) + ' mm';
+    setVal('topthickVal', state.topThickness.toFixed(1) + ' mm');
     imgdepth.value = String(state.imageDepth);
-    $('imgdepthVal').textContent = state.imageDepth.toFixed(1) + ' mm';
+    setVal('imgdepthVal', state.imageDepth.toFixed(1) + ' mm');
     tol.value = String(state.tolerance);
-    $('tolVal').textContent = state.tolerance.toFixed(2) + ' mm';
+    setVal('tolVal', state.tolerance.toFixed(2) + ' mm');
     keychain.checked = state.keychain;
     $<HTMLInputElement>('removebg').checked = state.removeBg;
     $<HTMLInputElement>('showswitch').checked = state.showSwitch;

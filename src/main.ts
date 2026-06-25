@@ -7,7 +7,7 @@ import { processImage } from './image/pipeline';
 import { runWizard } from './ui/wizard';
 import { downloadThreeMF } from './export/threemfExport';
 import { parseSvg } from './image/logo';
-import { SVG_SAMPLES } from './image/sample';
+import { SAMPLES, SVG_SAMPLES } from './image/sample';
 import { parseLetter, importFontFile } from './image/letter';
 import { LUCIDE_ICONS, buildSvg } from './image/lucideIcons';
 import type {
@@ -21,8 +21,19 @@ import type {
 } from './types';
 import { FILAMENTS } from './types';
 
+// Start fetching switch assets immediately at startup to run in parallel with worker setup
+const base = import.meta.env.BASE_URL;
+const assetsPromise = Promise.all([
+  fetch(base + 'assets/switch/mx/mx-socket.3mf').then((r) => r.arrayBuffer()),
+  fetch(base + 'assets/switch/mx/mx-stem.3mf').then((r) => r.arrayBuffer()),
+  fetch(base + 'assets/switch/mx/mx-switch.3mf').then((r) => r.arrayBuffer()),
+]).catch((err) => {
+  console.error('[assets] Pre-fetch failed:', err);
+  throw err;
+});
+
 /** Which editable color a clicked model part maps back to. */
-type ColorTarget = { kind: 'region'; index: number } | { kind: 'body' } | { kind: 'base' };
+type ColorTarget = { kind: 'region'; index: number; compIndex: number } | { kind: 'body' } | { kind: 'base' };
 
 // ---- State (UI-facing) ----
 const store = createStore<UiState>({
@@ -32,22 +43,23 @@ const store = createStore<UiState>({
   colorCount: 4,
   palette: [],
   baseShape: 'outline',
-  capWidthMm: 40,
+  capWidthMm: 35,
   topThickness: 1.5,
   imageDepth: 0.8,
   tolerance: 0.4,
-  smoothing: 0.65,
+  smoothing: 0.1,
   keychain: false,
   removeBg: true,
-  view: 'assembled',
-  showSwitch: false,
-  importMode: 'icon', // Default to 'icon' to show a live clicker immediately
+  view: 'exploded',
+  showSwitch: true,
+  importMode: 'image', // Land on the Image tab by default
   currentIconName: 'circle',
   colorMode: 'normal',
   limitedColors: [],
-  bodyColorRgb: [120, 124, 130] as RGB,
+  bodyColorRgb: [240, 240, 240] as RGB,
   paletteOverrides: [],
   baseColorOverride: null,
+  partOverrides: {},
 });
 
 // ---- Heavy data kept out of the reactive store ----
@@ -236,6 +248,16 @@ const ui = createUi(sidebarLeft, sidebarRight, statusEl, {
 store.subscribe((s) => ui.update(s));
 ui.update(store.get());
 
+// Load heart sample on startup
+SAMPLES[0].load().then((img) => {
+  originalImage = img;
+  if (assetsReady) {
+    reprocess();
+  }
+}).catch((err) => {
+  console.error('Failed to load default heart image', err);
+});
+
 // ---- Click a colored region on the 3D model to recolor it (live, no rebuild) ----
 viewer.onPartPick((index, clientX, clientY) => {
   const part = latestParts[index];
@@ -262,8 +284,11 @@ viewer.onPartPick((index, clientX, clientY) => {
 function partColorTarget(name: string): ColorTarget | null {
   if (name === 'base-body') return { kind: 'body' };
   if (name === 'top-base') return { kind: 'base' };
-  const m = /^top-color-(\d+)$/.exec(name);
-  return m ? { kind: 'region', index: +m[1] } : null;
+  const m = /^top-color-(\d+)(?:-(\d+))?$/.exec(name);
+  if (m) {
+    return { kind: 'region', index: +m[1], compIndex: m[2] ? +m[2] : 0 };
+  }
+  return null;
 }
 
 // Apply a recolor to the clicked part: update the live material + export data, and
@@ -275,11 +300,10 @@ function applyModelRecolor(target: ColorTarget, rgb: RGB, partIndex: number) {
 
   const s = store.get();
   if (target.kind === 'region') {
-    const palette = s.palette.slice();
-    if (palette[target.index]) palette[target.index] = { ...palette[target.index], filamentRgb: rgb };
-    const overrides = s.paletteOverrides.slice();
-    overrides[target.index] = rgb;
-    store.set({ palette, paletteOverrides: overrides });
+    const partName = `top-color-${target.index}-${target.compIndex}`;
+    const overrides = s.partOverrides ? { ...s.partOverrides } : {};
+    overrides[partName] = rgb;
+    store.set({ partOverrides: overrides });
     syncBaseColor(); // the cap frame mirrors the dominant region — keep it in step
   } else if (target.kind === 'body') {
     store.set({ bodyColorRgb: rgb });
@@ -288,18 +312,44 @@ function applyModelRecolor(target: ColorTarget, rgb: RGB, partIndex: number) {
   }
 }
 
-// The cap backing/frame color is derived from the dominant region (unless the user
-// pinned it). After a region recolor, repaint the frame part to match — live, no
-// rebuild — so it never lags a frame behind the inlay it shares a color with.
-function syncBaseColor() {
-  const s = store.get();
-  if (s.baseColorOverride || s.importMode === 'icon' || s.palette.length === 0) return;
+// ---- Cap frame / backing color ----
+const LIGHT_FRAME: RGB = [240, 240, 240];
+const DARK_FRAME: RGB = [38, 38, 42];
+
+function relLuminance(rgb: RGB): number {
+  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+}
+// A light or dark backing chosen to contrast the given ink, so a single-color design
+// is always visible against it.
+function contrastingFrame(ink: RGB): RGB {
+  return relLuminance(ink) > 150 ? DARK_FRAME : LIGHT_FRAME;
+}
+
+function dominantInk(s: UiState): RGB {
+  if (s.palette.length === 0) return [180, 180, 185];
   let domIdx = 0;
   for (let i = 1; i < s.palette.length; i++) {
     if (s.palette[i].coverage > s.palette[domIdx].coverage) domIdx = i;
   }
-  const baseRgb = s.palette[domIdx]?.filamentRgb;
-  if (!baseRgb) return;
+  return s.palette[domIdx]?.filamentRgb ?? [180, 180, 185];
+}
+
+// The cap backing/frame color. A photographic IMAGE tiles the whole cap, so the frame
+// mirrors its dominant region and blends in naturally. Line-art modes (icon/svg/text)
+// are typically a single ink — mirroring that ink would make the design vanish into
+// its own backing (the "svg comes out one color" bug), so we pick a contrasting frame
+// instead. The design then reads clearly without any manual recolor.
+function deriveFrameColor(s: UiState): RGB {
+  const ink = dominantInk(s);
+  return s.importMode === 'image' ? ink : contrastingFrame(ink);
+}
+
+// After a region recolor, repaint the frame part to match the derived color — live, no
+// rebuild — so it never lags a frame behind the inlay it shares a color with.
+function syncBaseColor() {
+  const s = store.get();
+  if (s.baseColorOverride || s.palette.length === 0) return;
+  const baseRgb = deriveFrameColor(s);
   const bi = latestParts.findIndex((p) => p.name === 'top-base');
   if (bi >= 0) {
     latestParts[bi] = { ...latestParts[bi], colorRgb: baseRgb };
@@ -375,12 +425,7 @@ worker.onerror = (e) => {
 
 async function initAssets() {
   try {
-    const base = import.meta.env.BASE_URL;
-    const [socket, stem, sw] = await Promise.all([
-      fetch(base + 'assets/switch/mx/mx-socket.3mf').then((r) => r.arrayBuffer()),
-      fetch(base + 'assets/switch/mx/mx-stem.3mf').then((r) => r.arrayBuffer()),
-      fetch(base + 'assets/switch/mx/mx-switch.3mf').then((r) => r.arrayBuffer()),
-    ]);
+    const [socket, stem, sw] = await assetsPromise;
     worker.postMessage({ type: 'init', socket, stem, switch: sw }, [socket, stem, sw]);
   } catch (err) {
     store.set({ status: 'Failed to load switch assets: ' + String(err) });
@@ -505,30 +550,30 @@ function rebuild() {
   }
   const s = store.get();
 
-  // Dominant color carries the slab + stem (the base filament).
-  let domIdx = 0;
-  for (let i = 1; i < s.palette.length; i++) {
-    if (s.palette[i].coverage > s.palette[domIdx].coverage) domIdx = i;
-  }
-
-  const regions: BuildRegion[] = regionSet.regions.map((r, i) => ({
-    filamentRgb: s.palette[i]?.filamentRgb ?? r.quantRgb,
-    heightLevel: s.palette[i]?.heightLevel ?? 0,
-    coverage: r.coverage,
-    rings: r.rings,
-  }));
+  const regions: BuildRegion[] = [];
+  regionSet.regions.forEach((r, i) => {
+    const baseColor = s.palette[i]?.filamentRgb ?? r.quantRgb;
+    const heightLevel = s.palette[i]?.heightLevel ?? 0;
+    r.components.forEach((comp, j) => {
+      const partName = `top-color-${i}-${j}`;
+      regions.push({
+        filamentRgb: s.partOverrides?.[partName] ?? baseColor,
+        heightLevel,
+        coverage: r.coverage, // Use the parent coverage for priority
+        rings: comp.rings,
+        partName,
+      });
+    });
+  });
 
   // Icons are line-art (a single-color silhouette), not a multi-color picture.
   // Using their thin stroke as the body outline makes a broken ring, so the body
   // is always a solid shape (circle/square) and the icon rides on top as a design.
-  // The cap base then needs a background distinct from the dark icon ink.
   const isIcon = s.importMode === 'icon';
   const effectiveBaseShape = isIcon && s.baseShape === 'outline' ? 'circle' : s.baseShape;
-  const defaultBaseColor: RGB = isIcon
-    ? ([240, 240, 240] as RGB)
-    : (s.palette[domIdx]?.filamentRgb ?? ([180, 180, 185] as RGB));
-  // A frame color the user pinned by clicking it on the model wins over the derived one.
-  const capBaseColor: RGB = s.baseColorOverride ?? defaultBaseColor;
+  // The cap backing contrasts line-art designs so they stay visible (see
+  // deriveFrameColor). A frame the user pinned by clicking the model wins over it.
+  const capBaseColor: RGB = s.baseColorOverride ?? deriveFrameColor(s);
 
   const params: BuildParams = {
     baseShape: effectiveBaseShape,
@@ -646,6 +691,7 @@ function saveProject() {
       bodyColorRgb: s.bodyColorRgb,
       paletteOverrides: s.paletteOverrides,
       baseColorOverride: s.baseColorOverride,
+      partOverrides: s.partOverrides,
     },
     palette: s.palette, // filament mappings + height levels
     image: originalImage ? imageToDataUrl(originalImage) : null,
@@ -686,6 +732,7 @@ async function loadProject(file: File) {
       limitedColors: set.limitedColors ?? [],
       bodyColorRgb: set.bodyColorRgb ?? [120, 124, 130],
       paletteOverrides: set.paletteOverrides ?? [],
+      partOverrides: set.partOverrides ?? {},
     });
 
     if (set.importMode === 'image' && proj.image) {

@@ -175,7 +175,7 @@ export function parseLetter(text: string, fontId: string, maxLen = 4): RegionSet
   // Default text color is off-white (#f7f7f5)
   const regions = [{
     quantRgb: [247, 247, 245] as RGB,
-    rings: normContours,
+    components: [{ rings: normContours, coverage: 1.0 }],
     coverage: 1.0
   }];
 

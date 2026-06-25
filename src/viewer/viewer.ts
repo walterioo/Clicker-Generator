@@ -28,7 +28,7 @@ export interface Viewer {
 // The grid sits a hair BELOW the model's bottom face (which lands at z = 0) so the
 // solid bottom occludes it cleanly — coplanar at z = 0 causes z-fighting that bleeds
 // grid lines up through the lower body.
-const GRID_GAP = 0.3;
+const GRID_GAP = 1.0;
 
 function partToGeometry(p: ClickerPart): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
@@ -107,6 +107,14 @@ export function createViewer(container: HTMLElement): Viewer {
     grid = new THREE.GridHelper(300, 30, accentColor, gridColor);
     grid.rotation.x = Math.PI / 2;
     grid.position.z = gridZ;
+    // Prevent grid lines from bleeding through model body:
+    // draw the grid first and skip depth-writes so opaque geometry always wins.
+    grid.renderOrder = -1;
+    if (Array.isArray(grid.material)) {
+      grid.material.forEach(m => { m.depthWrite = false; });
+    } else {
+      grid.material.depthWrite = false;
+    }
     scene.add(grid);
   }
 
@@ -125,11 +133,7 @@ export function createViewer(container: HTMLElement): Viewer {
   switchGroup.visible = false;
   root.add(capGroup, bodyGroup, switchGroup);
 
-  // Instant placeholder clicker so the viewport is never empty while the WASM
-  // kernel + switch assets load. It's a plain round cap built from three.js
-  // primitives (no worker, no build) and is removed the moment real parts land.
-  let placeholder: THREE.Group | null = buildPlaceholder();
-  root.add(placeholder);
+  let placeholder: THREE.Group | null = null;
   framePlaceholder();
 
   let viewMode: ViewMode = 'assembled';
@@ -147,51 +151,14 @@ export function createViewer(container: HTMLElement): Viewer {
   let downY = 0;
   let downT = 0;
 
-  // A plain, pre-built round clicker used as the at-rest placeholder. Pure
-  // three.js geometry so it renders instantly on first paint.
-  function buildPlaceholder(): THREE.Group {
-    const g = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: color([120, 124, 130]),
-      metalness: 0.0,
-      roughness: 0.55,
-    });
-    const capMat = new THREE.MeshStandardMaterial({
-      color: color([90, 158, 255]),
-      metalness: 0.0,
-      roughness: 0.45,
-    });
-
-    // Body slab (z 0 → 8).
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(20, 20, 8, 64), bodyMat);
-    body.rotation.x = Math.PI / 2;
-    body.position.z = 4;
-    g.add(body);
-
-    // Cap (z 8 → 13).
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(18.5, 19.5, 5, 64), capMat);
-    cap.rotation.x = Math.PI / 2;
-    cap.position.z = 10.5;
-    g.add(cap);
-
-    // Subtle dome so it reads as a flat-topped keycap rather than a coin.
-    const dome = new THREE.Mesh(
-      new THREE.SphereGeometry(18.5, 64, 24, 0, Math.PI * 2, 0, Math.PI / 2),
-      capMat,
-    );
-    dome.scale.set(1, 1, 0.08);
-    dome.rotation.x = Math.PI / 2;
-    dome.position.z = 13;
-    g.add(dome);
-
-    return g;
-  }
+  let outlineMesh: THREE.LineSegments | null = null;
+  const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x3b82f6, depthTest: false });
 
   function framePlaceholder() {
     root.position.set(0, 0, 0);
-    const radius = 40 * 1.4 + 10;
+    const radius = 40 * 2.2 + 15;
     camera.position.set(radius, -radius, radius * 0.75);
-    controls.target.set(0, 0, 7);
+    controls.target.set(0, 0, 11);
     controls.update();
   }
 
@@ -259,7 +226,7 @@ export function createViewer(container: HTMLElement): Viewer {
     const activeTheme = document.documentElement.getAttribute('data-theme') || 'dark';
     rebuildGrid(activeTheme, -GRID_GAP);
 
-    const radius = Math.max(size.x, size.y, size.z) * 1.4 + 10;
+    const radius = Math.max(size.x, size.y, size.z) * 2.2 + 15;
     camera.position.set(radius, -radius, radius * 0.75);
     controls.target.set(0, 0, size.z / 2);
     controls.update();
@@ -354,19 +321,34 @@ export function createViewer(container: HTMLElement): Viewer {
 
   // Paint hover/selection glow via emissive (keeps each part's true base color).
   function applyHighlight() {
+    if (outlineMesh) {
+      if (outlineMesh.parent) outlineMesh.parent.remove(outlineMesh);
+      outlineMesh.geometry.dispose();
+      outlineMesh = null;
+    }
+
     for (let i = 0; i < materials.length; i++) {
       const m = materials[i] as THREE.MeshStandardMaterial;
       if (!m || !m.emissive) continue;
       if (i === selectedIndex) {
         m.emissive.copy(HILITE);
-        m.emissiveIntensity = 0.35;
+        m.emissiveIntensity = 0.4;
       } else if (i === hoveredIndex) {
         m.emissive.copy(HILITE);
-        m.emissiveIntensity = 0.18;
+        m.emissiveIntensity = 0.2;
       } else {
         m.emissive.setRGB(0, 0, 0);
         m.emissiveIntensity = 1;
       }
+    }
+
+    const activeIdx = selectedIndex !== null ? selectedIndex : hoveredIndex;
+    if (activeIdx !== null && partMeshes[activeIdx]) {
+      const mesh = partMeshes[activeIdx];
+      const edges = new THREE.EdgesGeometry(mesh.geometry, 15); // only sharp edges > 15 deg
+      outlineMesh = new THREE.LineSegments(edges, outlineMaterial);
+      outlineMesh.renderOrder = 999;
+      mesh.parent?.add(outlineMesh);
     }
   }
 

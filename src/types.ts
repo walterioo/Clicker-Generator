@@ -27,7 +27,7 @@ export type Ring = [number, number][];
  *  centered on origin, Y-up. Worker scales by capWidthMm. */
 export interface RegionSet {
   /** One entry per palette color actually used. */
-  regions: { quantRgb: RGB; rings: Ring[]; coverage: number }[];
+  regions: { quantRgb: RGB; components: { rings: Ring[]; coverage: number }[]; coverage: number }[];
   /** Union silhouette of all foreground pixels. */
   outline: Ring[];
   /** Aspect (width/height) of the source silhouette, for reference. */
@@ -120,6 +120,7 @@ export interface BuildRegion {
   heightLevel: number;
   coverage: number; // fraction of foreground — drives carve priority (small detail wins)
   rings: Ring[];
+  partName: string;
 }
 
 // ---- Worker messages ----

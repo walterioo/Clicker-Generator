@@ -181,11 +181,11 @@ export function buildClicker(
   //     top face (slabTopZ) — the top reads as ONE flat surface, not raised. ---
   const topSlab = extrudeAt(imageArea, imageDepth, imageBottomZ);
   const ordered = regions
-    .map((r, i) => ({ r, i }))
+    .map((r) => ({ r }))
     .sort((a, b) => (a.r.coverage ?? 1) - (b.r.coverage ?? 1));
   let placed: Solid | null = null; // union of inlays already carved (no overlap)
   let inlayUnion: Solid | null = null; // union of all inlays (removed from base)
-  for (const { r, i } of ordered) {
+  for (const { r } of ordered) {
     let cs: Section = track(new CrossSection(scaleRings(r.rings), 'NonZero'));
     if (params.colorBleed > 0.001) cs = grow(cs, params.colorBleed);
     const clipped = track(cs.intersect(imageArea));
@@ -200,7 +200,7 @@ export function buildClicker(
       const lift = extrudeAt(clipped, level * params.stepHeight, slabTopZ - 0.01);
       inlay = track(inlay.add(lift));
     }
-    parts.push(toPart(inlay, 'cap', 'top', r.filamentRgb, `top-color-${i}`));
+    parts.push(toPart(inlay, 'cap', 'top', r.filamentRgb, r.partName));
     placed = placed ? track(placed.add(inlay)) : inlay;
     inlayUnion = inlayUnion ? track(inlayUnion.add(inlay)) : inlay;
   }

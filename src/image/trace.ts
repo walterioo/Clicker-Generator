@@ -49,18 +49,20 @@ export function traceRegions(q: QuantizeResult, smoothing = 0.5): RegionSet {
   // noise vanishes while real features (eyes, smile, thin strokes) stay intact —
   // unlike blurring the mask, which erases small features. Shared edges between
   // colors get identical input, so the regions stay gap-free.
-  const ringsFromMask = (mask: Float64Array): Ring[] => {
+  const componentsFromMask = (mask: Float64Array): Ring[][] => {
     const multi = contourGen(mask as unknown as number[])[0];
-    const out: Ring[] = [];
+    const out: Ring[][] = [];
     for (const poly of multi.coordinates) {
+      const compRings: Ring[] = [];
       for (const ring of poly) {
         const r = ring as [number, number][];
         if (Math.abs(ringArea(r)) < minRingArea) continue;
         const sampled = resampleClosed(r, resampleStep);
         const smooth = gaussianSmoothClosed(sampled, sigmaPts);
         const simplified = rdp(smooth, resampleStep * 0.25); // higher resolution simplification
-        if (simplified.length >= 3) out.push(simplified.map(norm));
+        if (simplified.length >= 3) compRings.push(simplified.map(norm));
       }
+      if (compRings.length > 0) out.push(compRings);
     }
     return out;
   };
@@ -94,16 +96,16 @@ export function traceRegions(q: QuantizeResult, smoothing = 0.5): RegionSet {
   for (let k = 0; k < K; k++) {
     const mask = new Float64Array(width * height);
     for (let p = 0; p < label.length; p++) mask[p] = label[p] === k ? 1 : 0;
-    const rings = ringsFromMask(mask);
-    if (rings.length === 0) continue;
-    regions.push({ quantRgb: palette[k].rgb as RGB, rings, coverage: palette[k].coverage });
+    const components = componentsFromMask(mask).map(rings => ({ rings, coverage: palette[k].coverage }));
+    if (components.length === 0) continue;
+    regions.push({ quantRgb: palette[k].rgb as RGB, components, coverage: palette[k].coverage });
   }
 
   // Outline = all foreground. It's a single region (no adjacency gaps), so blur
   // it for an extra-smooth cap edge.
   const fgMask = new Float64Array(width * height);
   for (let p = 0; p < indices.length; p++) fgMask[p] = indices[p] >= 0 ? 1 : 0;
-  const outline = ringsFromMask(boxBlur(fgMask, width, height, 1.6));
+  const outline = componentsFromMask(boxBlur(fgMask, width, height, 1.6)).flat();
 
   return { regions, outline, aspect: bw / bh };
 }

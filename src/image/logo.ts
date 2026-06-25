@@ -158,7 +158,7 @@ export function parseSvg(svgText: string): RegionSet {
     const ringPoints = g.rings.reduce((sum, r) => sum + r.length, 0);
     return {
       quantRgb: g.rgb,
-      rings: normRings,
+      components: [{ rings: normRings, coverage: ringPoints / totalPoints }],
       coverage: ringPoints / totalPoints
     };
   });
