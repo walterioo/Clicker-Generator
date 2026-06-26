@@ -143,18 +143,27 @@ export function createUi(
   statusEl: HTMLElement,
   cb: UiCallbacks
 ) {
+  // Small "?" help marker with a hover tooltip (tooltip itself is rendered to
+  // <body> by the handler below so it is never clipped by the scrolling sidebar).
+  const tip = (text: string) =>
+    `<span class="help-tip" tabindex="0" role="img" aria-label="Help: ${text.replace(/"/g, '&quot;')}" data-tip="${text.replace(/"/g, '&quot;')}">?</span>`;
+
   // Populate Left Sidebar (Settings + Preview)
   sidebarLeft.innerHTML = `
     <div class="app-header">
-      <h1>Clicker Generator <span class="sub">vector/image → clicker</span></h1>
+      <h1>Clicker Generator</h1>
+      <p class="app-subtitle">Generate printable 3D model of a clicker from an image</p>
+      <p class="app-credit">Made by <a href="https://makerworld.com/en/@Vostok_Labs" target="_blank" rel="noopener noreferrer">vostok labs</a></p>
       <div class="header-actions">
-      <button id="helpToggle" class="theme-btn help-btn" type="button" title="Show intro &amp; help" aria-label="Show intro and help">
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      </button>
-      <button id="themeToggle" class="theme-btn" type="button" title="Toggle light/dark mode" aria-label="Toggle theme">
-        <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
-        <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-      </button>
+        <button id="helpToggle" class="labeled-btn" type="button" aria-label="Show intro and help">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>Help</span>
+        </button>
+        <button id="themeToggle" class="labeled-btn" type="button" aria-label="Toggle theme">
+          <svg class="icon-sun" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
+          <svg class="icon-moon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span id="themeLabel">Dark mode</span>
+        </button>
       </div>
     </div>
 
@@ -165,7 +174,7 @@ export function createUi(
         <button class="tab" data-view="exploded" type="button">Exploded</button>
       </div>
       <div class="switch-row">
-        <span class="switch-label">Show MX switch</span>
+        <span class="switch-label">Show MX switch ${tip('Shows a reference MX switch in the preview so you can check the fit. It is not part of the exported model.')}</span>
         <label class="toggle"><input id="showswitch" type="checkbox" /><span class="slider"></span></label>
       </div>
     </div>
@@ -173,7 +182,7 @@ export function createUi(
     <div class="section">
       <span class="label">1 · Colors &amp; Smoothing</span>
       <div class="field" id="colorCountField">
-        <label for="ccount">Colors</label>
+        <label for="ccount">Colors ${tip('How many distinct filament colors the image is split into. Each color becomes a separate part in the export.')}</label>
         <select id="ccount">
           <option value="2">2 Colors</option>
           <option value="3">3 Colors</option>
@@ -190,7 +199,7 @@ export function createUi(
       </div>
       <div class="prow-stacked" id="smoothingField">
         <div class="prow-header">
-          <label for="smooth">Smoothing</label>
+          <label for="smooth">Smoothing ${tip('Simplifies and smooths the traced outlines. Higher values give fewer, cleaner edges; lower keeps more fine detail.')}</label>
           <input type="text" class="val" id="smoothVal" />
         </div>
         <input type="range" id="smooth" min="0" max="1" step="0.05" />
@@ -203,14 +212,14 @@ export function createUi(
     <div class="section">
       <span class="label">2 · Shape &amp; Size</span>
       <div class="field">
-        <label>Base style</label>
+        <label>Base style ${tip('Outline follows your image silhouette. Shape places the image on a preset base such as a circle or square.')}</label>
         <div class="tabs" id="shapeTypeTabs" role="tablist">
           <button class="tab" data-style="outline" type="button">Outline</button>
           <button class="tab" data-style="shape" type="button">Shape</button>
         </div>
       </div>
       <div class="field" id="shapeSelectField">
-        <label for="shapeSelect">Shape geometry</label>
+        <label for="shapeSelect">Shape geometry ${tip('The preset base shape used when the Shape base style is selected.')}</label>
         <select id="shapeSelect">
           <option value="circle">Circle</option>
           <option value="square">Square</option>
@@ -222,36 +231,42 @@ export function createUi(
       </div>
       <div class="prow-stacked">
         <div class="prow-header">
-          <label for="width">Width</label>
+          <label for="width">Size ${tip('Overall size of the clicker (its longest side, in mm). This scales the whole model proportionally, not just the width.')}</label>
           <input type="text" class="val" id="widthVal" />
         </div>
         <input type="range" id="width" min="20" max="70" step="1" />
       </div>
-      <div class="prow-stacked">
-        <div class="prow-header">
-          <label for="topthick">Top thickness</label>
-          <input type="text" class="val" id="topthickVal" />
-        </div>
-        <input type="range" id="topthick" min="1" max="4" step="0.1" />
-      </div>
-      <div class="prow-stacked">
-        <div class="prow-header">
-          <label for="imgdepth">Image depth</label>
-          <input type="text" class="val" id="imgdepthVal" />
-        </div>
-        <input type="range" id="imgdepth" min="0.2" max="3" step="0.1" />
-      </div>
-      <div class="prow-stacked">
-        <div class="prow-header">
-          <label for="tol">Fit tolerance</label>
-          <input type="text" class="val" id="tolVal" />
-        </div>
-        <input type="range" id="tol" min="0.2" max="0.8" step="0.05" />
-      </div>
       <div class="switch-row">
-        <span class="switch-label">Keychain loop</span>
+        <span class="switch-label">Keychain loop ${tip('Adds a small loop to the body so you can attach the clicker to a keychain.')}</span>
         <label class="toggle"><input id="keychain" type="checkbox" /><span class="slider"></span></label>
       </div>
+
+      <details class="more-settings">
+        <summary>More settings</summary>
+        <div class="more-settings-body">
+          <div class="prow-stacked">
+            <div class="prow-header">
+              <label for="topthick">Top thickness ${tip('Thickness of the solid top layer beneath the colored image, in mm.')}</label>
+              <input type="text" class="val" id="topthickVal" />
+            </div>
+            <input type="range" id="topthick" min="1" max="4" step="0.1" />
+          </div>
+          <div class="prow-stacked">
+            <div class="prow-header">
+              <label for="imgdepth">Image depth ${tip('How far the colored image is raised into the top surface, in mm.')}</label>
+              <input type="text" class="val" id="imgdepthVal" />
+            </div>
+            <input type="range" id="imgdepth" min="0.2" max="3" step="0.1" />
+          </div>
+          <div class="prow-stacked">
+            <div class="prow-header">
+              <label for="tol">Fit tolerance ${tip('Clearance around the MX switch socket so the cap fits without being too tight or too loose, in mm.')}</label>
+              <input type="text" class="val" id="tolVal" />
+            </div>
+            <input type="range" id="tol" min="0.2" max="0.8" step="0.05" />
+          </div>
+        </div>
+      </details>
     </div>
   `;
 
@@ -311,7 +326,7 @@ export function createUi(
         </div>
         <input type="file" id="file" accept="image/*" hidden />
         <div class="switch-row">
-          <span class="switch-label">Remove background</span>
+          <span class="switch-label">Remove background ${tip('Automatically removes a solid or near-uniform background from the uploaded image so only the subject is traced.')}</span>
           <label class="toggle"><input id="removebg" type="checkbox" /><span class="slider"></span></label>
         </div>
         <span class="sample-heading">Choose a sample image</span>
@@ -813,10 +828,60 @@ export function createUi(
   });
 
   // --- Theme toggle ---
+  // The label shows the mode you'll switch *to* (matches the visible icon).
+  const themeLabel = $('themeLabel');
+  const syncThemeLabel = () => {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    themeLabel.textContent = isLight ? 'Dark mode' : 'Light mode';
+  };
+  syncThemeLabel();
   $('themeToggle').addEventListener('click', () => {
     const current = document.documentElement.getAttribute('data-theme');
     const next = current === 'light' ? 'dark' : 'light';
     cb.onThemeChange(next);
+    // onThemeChange flips data-theme synchronously; re-read to update the label.
+    syncThemeLabel();
+  });
+
+  // --- Help tooltips ---
+  // A single bubble appended to <body> so it is never clipped by the scrolling
+  // sidebar. Shown while hovering / focusing any ".help-tip" marker.
+  const tipBubble = document.createElement('div');
+  tipBubble.className = 'help-tip-bubble';
+  tipBubble.hidden = true;
+  document.body.appendChild(tipBubble);
+
+  const showTip = (marker: HTMLElement) => {
+    const text = marker.getAttribute('data-tip');
+    if (!text) return;
+    tipBubble.textContent = text;
+    tipBubble.hidden = false;
+    const r = marker.getBoundingClientRect();
+    const bw = tipBubble.offsetWidth;
+    const bh = tipBubble.offsetHeight;
+    let left = r.left;
+    if (left + bw > window.innerWidth - 8) left = window.innerWidth - bw - 8;
+    left = Math.max(8, left);
+    let top = r.bottom + 8;
+    if (top + bh > window.innerHeight - 8) top = r.top - bh - 8; // flip above if no room
+    tipBubble.style.left = `${left}px`;
+    tipBubble.style.top = `${Math.max(8, top)}px`;
+  };
+  const hideTip = () => { tipBubble.hidden = true; };
+
+  document.addEventListener('mouseover', (e) => {
+    const marker = (e.target as HTMLElement).closest('.help-tip') as HTMLElement | null;
+    if (marker) showTip(marker);
+  });
+  document.addEventListener('mouseout', (e) => {
+    if ((e.target as HTMLElement).closest('.help-tip')) hideTip();
+  });
+  document.addEventListener('focusin', (e) => {
+    const marker = (e.target as HTMLElement).closest('.help-tip') as HTMLElement | null;
+    if (marker) showTip(marker);
+  });
+  document.addEventListener('focusout', (e) => {
+    if ((e.target as HTMLElement).closest('.help-tip')) hideTip();
   });
 
   // --- Welcome / intro modal ---

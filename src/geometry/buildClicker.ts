@@ -279,28 +279,37 @@ export function buildClicker(
     return track(track(Manifold.extrude(cs, Math.max(0.01, h))).translate([0, 0, z]));
   };
 
+  // Build the solid to SUBTRACT from a part to round (fillet) or bevel (chamfer) one
+  // of its horizontal edges. It is a stack of thin offset rings approximating the
+  // profile — fillet = quarter circle, chamfer = straight 45°.
+  //
+  // Two things make it look clean instead of a chunky, striped staircase:
+  //  • Step count scales with the radius, so the curve is finely tessellated.
+  //  • Each ring's OUTER edge is grown past the part wall (`outer`), so the cutter
+  //    never shares a coplanar face with the wall — coplanar faces z-fight in the
+  //    preview and that was the horizontal striping artifact.
   const createEdgeBevelBlock = (footprint: Section, r: number, style: EdgeStyle, zRef: number, isBottom: boolean): Solid | null => {
-    const steps = style === 'chamfer' ? 5 : 8;
+    const steps = Math.max(16, Math.min(40, Math.round(r * 14))); // ~0.07mm/step, smooth but not too costly
+    const outer = grow(footprint, 0.6); // extends the cutter just beyond the wall
     let block: Solid | null = null;
     for (let i = 0; i < steps; i++) {
       const t1 = i / steps;
       const t2 = (i + 1) / steps;
-      
-      const r1 = style === 'chamfer' ? r * t1 : r * (1 - Math.cos(t1 * Math.PI / 2));
-      const z1 = style === 'chamfer' ? r * t1 : r * Math.sin(t1 * Math.PI / 2);
-      const z2 = style === 'chamfer' ? r * t2 : r * Math.sin(t2 * Math.PI / 2);
-      
+
+      const r1 = style === 'chamfer' ? r * t1 : r * (1 - Math.cos((t1 * Math.PI) / 2));
+      const z1 = style === 'chamfer' ? r * t1 : r * Math.sin((t1 * Math.PI) / 2);
+      const z2 = style === 'chamfer' ? r * t2 : r * Math.sin((t2 * Math.PI) / 2);
+
       const widthToSubtract = r - r1;
-      if (widthToSubtract < 0.01) continue;
-      
+      if (widthToSubtract < 0.005) continue;
+
       const innerSection = track(footprint.offset(-widthToSubtract, 'Round', 2.0, 64));
-      if (sectionIsEmpty(innerSection)) continue;
-      
-      const ring = track(footprint.subtract(innerSection));
+      // When the inset collapses (radius ≈ half the part), remove the whole column.
+      const ring = sectionIsEmpty(innerSection) ? outer : track(outer.subtract(innerSection));
       const dz = z2 - z1;
       const stepZ = isBottom ? zRef + z1 : zRef - z2;
-      
-      const stepSolid = extrudeAt(ring, dz + 0.01, stepZ);
+
+      const stepSolid = extrudeAt(ring, dz + 0.02, stepZ);
       block = block ? track(block.add(stepSolid)) : stepSolid;
     }
     return block;
