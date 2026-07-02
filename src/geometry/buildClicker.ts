@@ -99,7 +99,7 @@ export function buildClicker(
     imgW = nW * imageScale;
     imgH = nH * imageScale;
   }
-  const sR = imageScale;
+  let sR = imageScale;
 
   const scaleRings = (rings: Ring[]): Ring[] =>
     rings.map((r) => r.map(([x, y]) => [x * sR, y * sR] as [number, number]));
@@ -281,10 +281,11 @@ export function buildClicker(
     const smoothingRadius = 4.0;
     plate = simp(track(solidPlate.offset(smoothingRadius, 'Round', 2.0, 24).offset(-smoothingRadius, 'Round', 2.0, 24)), 0.05);
   } else {
-    // The geometric shapes scale linearly with their radius, so rather than guessing
-    // a circumscribing radius (which clips the image on concave shapes like the star
-    // or heart), we scale the shape up just enough that the whole image PLUS the
-    // border frame fits inside it.
+    // "Size" (capWidthMm) is the clicker's overall outer longest side (see the UI
+    // tooltip). We size the shape to that dimension directly and shrink the IMAGE to
+    // sit inside it — NOT the reverse (growing the shape to circumscribe the image),
+    // which inflated a round cap by up to √2× the requested Size (a 50 mm setting
+    // yielded a ~65–70 mm circle).
     const genShape = (rr: number): Section => {
       switch (params.baseShape) {
         case 'square': return roundedRect(2 * rr, 2 * rr, 2 * rr * 0.22);
@@ -296,26 +297,44 @@ export function buildClicker(
         default: return track(CrossSection.circle(rr, 160));
       }
     };
-    // Rectangle (half-extents) that must sit inside the plate: image + border, with a
-    // floor so tiny images still produce a sensible cap.
-    const halfW = Math.max(imgW / 2 + border, minCap / 2);
-    const halfH = Math.max(imgH / 2 + border, minCap / 2);
-    const unit = genShape(1); // test the image rect against the r = 1 shape
-    const fits = (k: number): boolean => {
-      const rect = track(CrossSection.square([(2 * halfW) / k, (2 * halfH) / k], true));
-      const outside = track(rect.subtract(unit));
-      return sectionIsEmpty(outside);
+    // "Size" (capWidthMm) is the finished clicker's OUTER longest side — i.e. the
+    // BODY/bezel, which is what a caliper measures on the assembled part. The body is
+    // the cap grown outward by the well tolerance + border (`grow` is a Round offset =
+    // Minkowski sum with a disk, so it adds exactly `outerPad` to EVERY side, for any
+    // shape, convex or concave). So the cap's longest side must be Size − 2·outerPad
+    // for the body to span Size. Each generator is linear in rr, so read the unit
+    // shape's bbox once and divide. Floor the cap at minCap so a very small Size still
+    // clears the switch column (below that, the switch — not Size — sets the size).
+    const unit = genShape(1);
+    const ub = unit.bounds();
+    const unitLongest = Math.max(ub.max[0] - ub.min[0], ub.max[1] - ub.min[1]) || 2;
+    const outerPad = tol + Math.max(0.4, params.borderWidth);
+    const capLongest = Math.max(params.capWidthMm - 2 * outerPad, minCap);
+    const R = capLongest / unitLongest;
+    plate = genShape(R);
+
+    // Now shrink the image so its bordered bbox fits INSIDE the fixed shape. Binary-
+    // search the largest image scale that still fits: rect ÷ R must fit in the unit
+    // shape (genShape is linear). This overrides the capWidthMm-based imageScale above,
+    // and sR must follow so the inlays are scaled to match.
+    const fitsImg = (s: number): boolean => {
+      const rw = (nW * s + 2 * border) / R;
+      const rh = (nH * s + 2 * border) / R;
+      const rect = track(CrossSection.square([rw, rh], true));
+      return sectionIsEmpty(track(rect.subtract(unit)));
     };
-    // Bracket an upper bound that fits, then binary-search the smallest radius.
-    let hi = Math.max(1, Math.hypot(halfW, halfH));
-    for (let i = 0; i < 40 && !fits(hi); i++) hi *= 2;
-    let lo = 1e-3;
+    let lo = 0;
+    let hiS = capLongest;
+    for (let i = 0; i < 40 && fitsImg(hiS); i++) { lo = hiS; hiS *= 2; }
     for (let i = 0; i < 26; i++) {
-      const mid = (lo + hi) / 2;
-      if (fits(mid)) hi = mid;
-      else lo = mid;
+      const mid = (lo + hiS) / 2;
+      if (fitsImg(mid)) lo = mid;
+      else hiS = mid;
     }
-    plate = genShape(hi);
+    imageScale = lo;
+    imgW = nW * imageScale;
+    imgH = nH * imageScale;
+    sR = imageScale;
   }
 
   const imageArea = shrink(plate, border, plate); // flat frame around the image
