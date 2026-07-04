@@ -200,10 +200,11 @@ export function createUi(
       </div>
       <div class="prow-stacked">
         <div class="prow-header">
-          <label for="width">Size ${tip('Overall size of the clicker (its longest side, in mm). This scales the whole model proportionally, not just the width.')}</label>
+          <label for="width">Size ${tip('Size of the cap — the pressable top face, in mm (its longest side). The body/bezel around it is larger; its total outer size is shown just below.')}</label>
           <input type="text" class="val" id="widthVal" />
         </div>
         <input type="range" id="width" min="20" max="70" step="1" />
+        <div class="prow-subnote" id="baseTotalNote"></div>
       </div>
     </div>
 
@@ -1467,6 +1468,13 @@ export function createUi(
     setVal('smoothVal', Math.round(state.smoothing * 100) + '%');
     width.value = String(state.capWidthMm);
     setVal('widthVal', state.capWidthMm + ' mm');
+    // Total outer size of the body/bezel = cap + 2·(tolerance + borderWidth), the same
+    // outward growth buildClicker applies. borderWidth mirrors main.ts buildBuildParams
+    // (text 3.5, else 2.6). Exact across the 20–70 mm slider (minCap never clamps there).
+    const borderWidth = state.importMode === 'text' ? 3.5 : 2.6;
+    const baseTotalMm = state.capWidthMm + 2 * (Math.max(0.05, state.tolerance) + borderWidth);
+    const baseTotalNote = document.getElementById('baseTotalNote');
+    if (baseTotalNote) baseTotalNote.textContent = `Total base size: ${baseTotalMm.toFixed(1)} mm`;
     topthick.value = String(state.topThickness);
     setVal('topthickVal', state.topThickness.toFixed(1) + ' mm');
     imgdepth.value = String(state.imageDepth);

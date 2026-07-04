@@ -281,6 +281,10 @@ details.section-collapsible[open] > summary { padding-bottom: 14px; }
   border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
 }
+.prow-subnote {
+  color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+  margin-top: -1px;
+}
 
 /* Legacy prow kept for any remaining uses */
 .prow {
